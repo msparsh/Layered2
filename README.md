@@ -1,4 +1,6 @@
-# Layered
+# Layered2
+Cloned from Layered
+
 
 Layered is a distraction-free desktop bullet journal designed to help you organize your thoughts, tasks, and daily plans with absolute creative freedom. 
 
