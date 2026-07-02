@@ -93,6 +93,16 @@ app.whenReady().then(() => {
         }
     });
 
+    ipcMain.handle('read-text', async (event, relativePath) => {
+        try {
+            const safePath = getSafePath(relativePath);
+            return await fs.readFile(safePath, 'utf8');
+        } catch (error) {
+            if (error.code === 'ENOENT') return null;
+            return null;
+        }
+    });
+
     ipcMain.handle('write-json-atomic', async (event, relativePath, data) => {
         try {
             const targetPath = getSafePath(relativePath);
@@ -101,6 +111,18 @@ app.whenReady().then(() => {
             return true;
         } catch (error) {
             console.error(`Error writing ${relativePath}:`, error);
+            return false;
+        }
+    });
+
+    ipcMain.handle('write-text-atomic', async (event, relativePath, data) => {
+        try {
+            const targetPath = getSafePath(relativePath);
+            await fs.mkdir(path.dirname(targetPath), { recursive: true });
+            await writeFileAtomic(targetPath, data, 'utf8');
+            return true;
+        } catch (error) {
+            console.error(`Error writing text ${relativePath}:`, error);
             return false;
         }
     });

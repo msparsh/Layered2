@@ -2,7 +2,9 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('electronAPI', {
     readJson: (relativePath) => ipcRenderer.invoke('read-json', relativePath),
+    readText: (relativePath) => ipcRenderer.invoke('read-text', relativePath),
     writeJsonAtomic: (relativePath, data) => ipcRenderer.invoke('write-json-atomic', relativePath, data),
+    writeTextAtomic: (relativePath, data) => ipcRenderer.invoke('write-text-atomic', relativePath, data),
     writeImageBase64: (relativePath, base64Data) => ipcRenderer.invoke('write-image-base64', relativePath, base64Data),
     trashJson: (relativePath) => ipcRenderer.invoke('trash-json', relativePath),
     showContextMenu: (template) => ipcRenderer.send('show-context-menu', template),
