@@ -286,12 +286,12 @@ class BujoStore {
     await this.executeSave();
   }
 
-  async spawnImage(src: string, cX?: number, cY?: number) {
+  async spawnImage(src: string, cX?: number, cY?: number, targetPageId?: string) {
     const ext = getExtensionFromBase64(src);
     const id = `${Utils.generateId()}.${ext}`;
     await FileSystemAPI.writeImageBase64(`images/${id}`, src);
     
-    const pageId = this.meta.pageOrder[this.meta.currentP];
+    const pageId = targetPageId || this.meta.pageOrder[this.meta.currentP];
     const img: PlacedImage = {
       id,
       pageId,

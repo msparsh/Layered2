@@ -265,7 +265,8 @@
             store.spawnImage(
               s.src,
               localX,
-              localY
+              localY,
+              pId
             );
           }
           store.draggingStickerId = null;
@@ -286,7 +287,7 @@
           fr.onload = (ev) => {
             const b = ev.target?.result as string;
             StickerBookManager.saveSticker(b);
-            store.spawnImage(b, localX, localY);
+            store.spawnImage(b, localX, localY, pId);
           };
           fr.readAsDataURL(f);
         }
@@ -315,7 +316,10 @@
                   r.x = x;
                   r.y = y;
                 },
-                onDragEnd: () => store.requestSave()
+                onDragEnd: () => {
+                  store.dirtyPages.add(pId);
+                  store.requestSave();
+                }
               }}
               oncontextmenu={(e) =>
                 openCtx(e, [
@@ -323,6 +327,7 @@
                     label: r.locked ? "Unlock" : "Lock",
                     action: () => {
                       r.locked = !r.locked;
+                      store.dirtyPages.add(pId);
                       store.requestSave();
                     },
                   },
@@ -332,6 +337,7 @@
                       label: pt.charAt(0).toUpperCase() + pt.slice(1),
                       action: () => {
                         r.paperType = pt;
+                        store.dirtyPages.add(pId);
                         store.requestSave();
                       },
                     })),
@@ -342,6 +348,7 @@
                       label: l,
                       action: () => {
                         r.layerBucket = l;
+                        store.dirtyPages.add(pId);
                         store.requestSave();
                       },
                     })),
@@ -393,7 +400,10 @@
                       r.width = w;
                       r.height = h;
                     },
-                    onResizeEnd: () => store.requestSave()
+                    onResizeEnd: () => {
+                      store.dirtyPages.add(pId);
+                      store.requestSave();
+                    }
                   }}
                   class="absolute bottom-0 right-0 w-5 h-5 cursor-se-resize flex items-end justify-end p-1 opacity-0 hover:opacity-100 transition-opacity z-10"
                 >
@@ -415,6 +425,7 @@
                       label: img.locked ? "Unlock" : "Lock",
                       action: () => {
                         img.locked = !img.locked;
+                        store.dirtyPages.add(pId);
                         store.requestSave();
                       },
                     },
@@ -424,6 +435,7 @@
                         label: `${s}x`,
                         action: () => {
                           img.scale = s;
+                          store.dirtyPages.add(pId);
                           store.requestSave();
                         },
                       })),
@@ -434,6 +446,7 @@
                         label: `${Math.round(o * 100)}%`,
                         action: () => {
                           img.opacity = o;
+                          store.dirtyPages.add(pId);
                           store.requestSave();
                         },
                       })),
@@ -442,6 +455,7 @@
                       label: "Rotate",
                       action: () => {
                         img.rotation = ((img.rotation || 0) + 45) % 360;
+                        store.dirtyPages.add(pId);
                         store.requestSave();
                       },
                     },
@@ -451,6 +465,7 @@
                         label: l,
                         action: () => {
                           img.layerBucket = l;
+                          store.dirtyPages.add(pId);
                           store.requestSave();
                         },
                       })),
@@ -473,7 +488,10 @@
                     img.left = x;
                     img.top = y;
                   },
-                  onDragEnd: () => store.requestSave()
+                  onDragEnd: () => {
+                    store.dirtyPages.add(pId);
+                    store.requestSave();
+                  }
                 }}
               />
             {/if}
