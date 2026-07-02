@@ -97,6 +97,11 @@ class BujoStore {
   loadedPages = $state<Record<string, PageState>>({});
   loadedRegionMarkdown = $state<Record<string, string>>({});
   loadedImages = $state<Record<string, string>>({});
+  pageTransforms = $state<Record<string, { zoom: number; pan: { x: number; y: number } }>>({});
+
+  getTransform(pId: string) {
+    return this.pageTransforms[pId] || { zoom: 1, pan: { x: 0, y: 0 } };
+  }
 
   // Centralized UI states to avoid invalid state exports in Svelte 5
   loadedStickers = $state<LoadedSticker[]>([]);
@@ -457,7 +462,10 @@ export const RegionManager = {
     store.isDrawingRegion = true;
     document.body.style.userSelect = "none";
     this.surfaceId = w.dataset.pageId || null;
-    const { x, y } = Utils.calcRectOffset(e.clientX, e.clientY, w.getBoundingClientRect());
+    const rect = w.getBoundingClientRect();
+    const transform = store.getTransform(this.surfaceId!);
+    const x = (e.clientX - rect.left - transform.pan.x) / transform.zoom;
+    const y = (e.clientY - rect.top - transform.pan.y) / transform.zoom;
     this.startX = x;
     this.startY = y;
     store.tempRegion = { x, y, w: 0, h: 0, surfaceId: this.surfaceId };
@@ -466,7 +474,10 @@ export const RegionManager = {
     if (!store.isDrawingRegion) return;
     const w = ([...Utils.qsa(".page-wrapper")] as HTMLElement[]).find((w) => w.dataset.pageId === this.surfaceId);
     if (!w) return;
-    const { x, y } = Utils.calcRectOffset(e.clientX, e.clientY, w.getBoundingClientRect());
+    const rect = w.getBoundingClientRect();
+    const transform = store.getTransform(this.surfaceId!);
+    const x = (e.clientX - rect.left - transform.pan.x) / transform.zoom;
+    const y = (e.clientY - rect.top - transform.pan.y) / transform.zoom;
     store.tempRegion = {
       ...store.tempRegion,
       x: Math.min(this.startX, x),
@@ -539,8 +550,11 @@ export function customDraggable(node: HTMLElement, params: { left: number; top: 
   const onPointerMove = (e: PointerEvent) => {
     if (!active) return;
     if (currentParams.locked) return;
-    const dx = e.clientX - startX;
-    const dy = e.clientY - startY;
+    const pageWrapper = node.closest(".page-wrapper") as HTMLElement;
+    const pageId = pageWrapper?.dataset.pageId;
+    const zoom = pageId ? store.getTransform(pageId).zoom : 1;
+    const dx = (e.clientX - startX) / zoom;
+    const dy = (e.clientY - startY) / zoom;
     currentParams.onDrag(initialLeft + dx, initialTop + dy);
   };
 
@@ -593,8 +607,11 @@ export function customResizable(node: HTMLElement, params: { width: number; heig
 
   const onPointerMove = (e: PointerEvent) => {
     if (!active) return;
-    const dx = e.clientX - startX;
-    const dy = e.clientY - startY;
+    const pageWrapper = node.closest(".page-wrapper") as HTMLElement;
+    const pageId = pageWrapper?.dataset.pageId;
+    const zoom = pageId ? store.getTransform(pageId).zoom : 1;
+    const dx = (e.clientX - startX) / zoom;
+    const dy = (e.clientY - startY) / zoom;
     currentParams.onResize(
       Math.max(CONFIG.MIN_REGION_SIZE, startWidth + dx),
       Math.max(CONFIG.MIN_REGION_SIZE, startHeight + dy)

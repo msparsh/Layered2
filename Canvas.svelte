@@ -91,6 +91,145 @@
     evs.forEach((ev, i) => node.addEventListener(ev, hs[i]));
     return { destroy: () => evs.forEach((ev, i) => node.removeEventListener(ev, hs[i])) };
   };
+
+  function zoomPanAction(node: HTMLElement, pId: string) {
+    let initialDistance = 0;
+    let initialZoom = 1;
+    let initialCenter = { x: 0, y: 0 };
+    let initialPan = { x: 0, y: 0 };
+    let pageRect: DOMRect | null = null;
+    let isPinching = false;
+
+    const getMutableTransform = () => {
+      if (!store.pageTransforms[pId]) {
+        store.pageTransforms[pId] = { zoom: 1, pan: { x: 0, y: 0 } };
+      }
+      return store.pageTransforms[pId];
+    };
+
+    const onTouchStart = (e: TouchEvent) => {
+      if (e.touches.length >= 2) {
+        if (store.isDrawingRegion) {
+          store.isDrawingRegion = false;
+        }
+      }
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        isPinching = true;
+        
+        const t1 = e.touches[0];
+        const t2 = e.touches[1];
+        
+        const dx = t2.clientX - t1.clientX;
+        const dy = t2.clientY - t1.clientY;
+        initialDistance = Math.hypot(dx, dy);
+        
+        const transform = getMutableTransform();
+        initialZoom = transform.zoom;
+        initialPan = { ...transform.pan };
+        
+        initialCenter = {
+          x: (t1.clientX + t2.clientX) / 2,
+          y: (t1.clientY + t2.clientY) / 2
+        };
+        
+        pageRect = node.getBoundingClientRect();
+      }
+    };
+
+    const onTouchMove = (e: TouchEvent) => {
+      if (isPinching && e.touches.length === 2 && pageRect) {
+        e.preventDefault();
+        
+        const t1 = e.touches[0];
+        const t2 = e.touches[1];
+        
+        const dx = t2.clientX - t1.clientX;
+        const dy = t2.clientY - t1.clientY;
+        const distance = Math.hypot(dx, dy);
+        
+        if (initialDistance > 0) {
+          const factor = distance / initialDistance;
+          const newZoom = Math.max(0.5, Math.min(5, initialZoom * factor));
+          
+          const centerX = (t1.clientX + t2.clientX) / 2;
+          const centerY = (t1.clientY + t2.clientY) / 2;
+          
+          const pagePointX = (initialCenter.x - pageRect.left - initialPan.x) / initialZoom;
+          const pagePointY = (initialCenter.y - pageRect.top - initialPan.y) / initialZoom;
+          
+          const newPanX = (centerX - pageRect.left) - pagePointX * newZoom;
+          const newPanY = (centerY - pageRect.top) - pagePointY * newZoom;
+          
+          const transform = getMutableTransform();
+          transform.zoom = newZoom;
+          transform.pan = { x: newPanX, y: newPanY };
+        }
+      }
+    };
+
+    const onTouchEnd = (e: TouchEvent) => {
+      if (isPinching && e.touches.length < 2) {
+        isPinching = false;
+        pageRect = null;
+      }
+    };
+
+    const onWheel = (e: WheelEvent) => {
+      if (e.ctrlKey) {
+        e.preventDefault();
+        const rect = node.getBoundingClientRect();
+        const transform = getMutableTransform();
+        
+        const zoomSpeed = 0.01;
+        const oldZoom = transform.zoom;
+        const newZoom = Math.max(0.5, Math.min(5, oldZoom * (1 - e.deltaY * zoomSpeed)));
+        
+        const mouseX = e.clientX;
+        const mouseY = e.clientY;
+        
+        const pagePointX = (mouseX - rect.left - transform.pan.x) / oldZoom;
+        const pagePointY = (mouseY - rect.top - transform.pan.y) / oldZoom;
+        
+        transform.pan.x = (mouseX - rect.left) - pagePointX * newZoom;
+        transform.pan.y = (mouseY - rect.top) - pagePointY * newZoom;
+        transform.zoom = newZoom;
+      } else {
+        const transform = getMutableTransform();
+        if (transform.zoom > 1.001 || transform.pan.x !== 0 || transform.pan.y !== 0) {
+          e.preventDefault();
+          transform.pan.x -= e.deltaX;
+          transform.pan.y -= e.deltaY;
+        }
+      }
+    };
+
+    const onDblClick = (e: MouseEvent) => {
+      if (e.target === node) {
+        const transform = getMutableTransform();
+        transform.zoom = 1;
+        transform.pan = { x: 0, y: 0 };
+      }
+    };
+
+    node.addEventListener("touchstart", onTouchStart, { passive: false });
+    node.addEventListener("touchmove", onTouchMove, { passive: false });
+    node.addEventListener("touchend", onTouchEnd);
+    node.addEventListener("touchcancel", onTouchEnd);
+    node.addEventListener("wheel", onWheel, { passive: false });
+    node.addEventListener("dblclick", onDblClick);
+
+    return {
+      destroy() {
+        node.removeEventListener("touchstart", onTouchStart);
+        node.removeEventListener("touchmove", onTouchMove);
+        node.removeEventListener("touchend", onTouchEnd);
+        node.removeEventListener("touchcancel", onTouchEnd);
+        node.removeEventListener("wheel", onWheel);
+        node.removeEventListener("dblclick", onDblClick);
+      }
+    };
+  }
 </script>
 
 <div
@@ -101,6 +240,7 @@
     <div
       class="page-wrapper w-[100vw] min-h-screen flex-shrink-0 relative flex justify-center overflow-hidden"
       data-page-id={pId}
+      use:zoomPanAction={pId}
       use:pointerAction={{
         ignore: (e) =>
           ["TEXTAREA", "BUTTON"].includes((e.target as HTMLElement).tagName) ||
@@ -119,10 +259,13 @@
           const s = store.loadedStickers.find((st) => st.id === store.draggingStickerId);
           if (s) {
             const r = e.currentTarget.getBoundingClientRect();
+            const transform = store.getTransform(pId);
+            const localX = (e.clientX - r.left - transform.pan.x) / transform.zoom;
+            const localY = (e.clientY - r.top - transform.pan.y) / transform.zoom;
             store.spawnImage(
               s.src,
-              e.clientX - r.left,
-              e.clientY - r.top
+              localX,
+              localY
             );
           }
           store.draggingStickerId = null;
@@ -132,6 +275,9 @@
       ondrop={(e) => {
         e.preventDefault();
         const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+        const transform = store.getTransform(pId);
+        const localX = (e.clientX - r.left - transform.pan.x) / transform.zoom;
+        const localY = (e.clientY - r.top - transform.pan.y) / transform.zoom;
         const f = Array.from(e.dataTransfer?.files || []).find((x) =>
           x.type.startsWith("image/")
         );
@@ -140,7 +286,7 @@
           fr.onload = (ev) => {
             const b = ev.target?.result as string;
             StickerBookManager.saveSticker(b);
-            store.spawnImage(b, e.clientX - r.left, e.clientY - r.top);
+            store.spawnImage(b, localX, localY);
           };
           fr.readAsDataURL(f);
         }
@@ -151,191 +297,196 @@
       </div>
 
       {#if store.loadedPages[pId]}
-        <!-- 📐 REGIONS -->
-        {#each store.loadedPages[pId].regions as r (r.id)}
-          <div
-            class="region-box absolute border transition-colors duration-300 rounded-lg flex flex-col layer-{r.layerBucket || 'paper'} paper-{r.paperType || 'blank'} border-zinc-300 hover:border-zinc-400 shadow-sm"
-            data-locked={r.locked}
-            style="left:{r.x}px;top:{r.y}px;width:{r.width}px;min-height:{r.height}px;"
-            use:customDraggable={{
-              left: r.x,
-              top: r.y,
-              locked: r.locked,
-              onDrag: (x, y) => {
-                r.x = x;
-                r.y = y;
-              },
-              onDragEnd: () => store.requestSave()
-            }}
-            oncontextmenu={(e) =>
-              openCtx(e, [
-                {
-                  label: r.locked ? "Unlock" : "Lock",
-                  action: () => {
-                    r.locked = !r.locked;
-                    store.requestSave();
-                  },
-                },
-                {
-                  label: `Paper (${r.paperType || "blank"})`,
-                  submenu: CONFIG.PAPER_TYPES.map((pt) => ({
-                    label: pt.charAt(0).toUpperCase() + pt.slice(1),
-                    action: () => {
-                      r.paperType = pt;
-                      store.requestSave();
-                    },
-                  })),
-                },
-                {
-                  label: `Layer (${r.layerBucket || "paper"})`,
-                  submenu: CONFIG.LAYERS.map((l) => ({
-                    label: l,
-                    action: () => {
-                      r.layerBucket = l;
-                      store.requestSave();
-                    },
-                  })),
-                },
-                {
-                  label: "Clear",
-                  action: () => {
-                    store.loadedRegionMarkdown[r.pageId] = "";
-                    store.dirtyRegions.add(r.pageId);
-                    store.requestSave();
-                  },
-                },
-                {
-                  label: "Delete",
-                  danger: true,
-                  action: () => store.removeRegion(r.id),
-                },
-              ])}
-          >
+        <div
+          class="w-full h-full relative origin-top-left"
+          style="transform: translate({store.getTransform(pId).pan.x}px, {store.getTransform(pId).pan.y}px) scale({store.getTransform(pId).zoom});"
+        >
+          <!-- 📐 REGIONS -->
+          {#each store.loadedPages[pId].regions as r (r.id)}
             <div
-              class="region-drag-handle h-5 bg-transparent {r.locked ? 'cursor-default' : 'cursor-grab active:cursor-grabbing'} rounded-t-lg flex items-center px-2 hover:bg-black/5 transition-colors group"
-            ></div>
-            <div
-              class="flex-1 py-2 px-3 overflow-y-auto cursor-text select-text"
-              style="touch-action:pan-y;"
-              onclick={(e) => {
-                e.stopPropagation();
+              class="region-box absolute border transition-colors duration-300 rounded-lg flex flex-col layer-{r.layerBucket || 'paper'} paper-{r.paperType || 'blank'} border-zinc-300 hover:border-zinc-400 shadow-sm"
+              data-locked={r.locked}
+              style="left:{r.x}px;top:{r.y}px;width:{r.width}px;min-height:{r.height}px;"
+              use:customDraggable={{
+                left: r.x,
+                top: r.y,
+                locked: r.locked,
+                onDrag: (x, y) => {
+                  r.x = x;
+                  r.y = y;
+                },
+                onDragEnd: () => store.requestSave()
               }}
-            >
-              <div class="min-h-full w-full h-full milkdown-container">
-                {#if store.loadedRegionMarkdown[r.pageId] !== undefined}
-                  <div
-                    use:milkdownEditor={{
-                      pageId: r.pageId,
-                      content: store.loadedRegionMarkdown[r.pageId],
-                    }}
-                    class="w-full h-full"
-                  ></div>
-                {/if}
-              </div>
-            </div>
-            {#if !r.locked}
-              <div
-                use:customResizable={{
-                  width: r.width,
-                  height: r.height,
-                  locked: r.locked,
-                  onResize: (w, h) => {
-                    r.width = w;
-                    r.height = h;
-                  },
-                  onResizeEnd: () => store.requestSave()
-                }}
-                class="absolute bottom-0 right-0 w-5 h-5 cursor-se-resize flex items-end justify-end p-1 opacity-0 hover:opacity-100 transition-opacity z-10"
-              >
-                <div class="w-2 h-2 border-r-2 border-b-2 border-zinc-400 rounded-sm pointer-events-none"></div>
-              </div>
-            {/if}
-          </div>
-        {/each}
-
-        <!-- 🖼️ PLACED IMAGES -->
-        {#each store.loadedPages[pId].placedImages as img (img.id)}
-          {#if store.loadedImages[img.id]}
-            <img
-              src={store.loadedImages[img.id]}
-              draggable="false"
               oncontextmenu={(e) =>
                 openCtx(e, [
                   {
-                    label: img.locked ? "Unlock" : "Lock",
+                    label: r.locked ? "Unlock" : "Lock",
                     action: () => {
-                      img.locked = !img.locked;
+                      r.locked = !r.locked;
                       store.requestSave();
                     },
                   },
                   {
-                    label: `Resize (${img.scale ?? 1}x)`,
-                    submenu: CONFIG.SCALES.map((s) => ({
-                      label: `${s}x`,
+                    label: `Paper (${r.paperType || "blank"})`,
+                    submenu: CONFIG.PAPER_TYPES.map((pt) => ({
+                      label: pt.charAt(0).toUpperCase() + pt.slice(1),
                       action: () => {
-                        img.scale = s;
+                        r.paperType = pt;
                         store.requestSave();
                       },
                     })),
                   },
                   {
-                    label: `Opacity (${Math.round((img.opacity ?? 1) * 100)}%)`,
-                    submenu: CONFIG.OPACITIES.map((o) => ({
-                      label: `${Math.round(o * 100)}%`,
-                      action: () => {
-                        img.opacity = o;
-                        store.requestSave();
-                      },
-                    })),
-                  },
-                  {
-                    label: "Rotate",
-                    action: () => {
-                      img.rotation = ((img.rotation || 0) + 45) % 360;
-                      store.requestSave();
-                    },
-                  },
-                  {
-                    label: `Layer (${img.layerBucket || "sticker"})`,
+                    label: `Layer (${r.layerBucket || "paper"})`,
                     submenu: CONFIG.LAYERS.map((l) => ({
                       label: l,
                       action: () => {
-                        img.layerBucket = l;
+                        r.layerBucket = l;
                         store.requestSave();
                       },
                     })),
+                  },
+                  {
+                    label: "Clear",
+                    action: () => {
+                      store.loadedRegionMarkdown[r.pageId] = "";
+                      store.dirtyRegions.add(r.pageId);
+                      store.requestSave();
+                    },
                   },
                   {
                     label: "Delete",
                     danger: true,
-                    action: () => store.removeImage(img.id),
+                    action: () => store.removeRegion(r.id),
                   },
                 ])}
-              class="draggable-image layer-{img.layerBucket || 'sticker'}"
-              data-locked={img.locked}
-              alt="placed"
-              style="left:{img.left}px;top:{img.top}px;transform: rotate({img.rotation || 0}deg) scale({(img.scale ?? 1) * (zoomedImgId === img.id ? 1.25 : 1)}); opacity:{img.opacity ?? 1}; transform-origin: center;"
-              use:customDraggable={{
-                left: img.left,
-                top: img.top,
-                locked: img.locked,
-                onDrag: (x, y) => {
-                  img.left = x;
-                  img.top = y;
-                },
-                onDragEnd: () => store.requestSave()
-              }}
-            />
-          {/if}
-        {/each}
-      {/if}
+            >
+              <div
+                class="region-drag-handle h-5 bg-transparent {r.locked ? 'cursor-default' : 'cursor-grab active:cursor-grabbing'} rounded-t-lg flex items-center px-2 hover:bg-black/5 transition-colors group"
+              ></div>
+              <div
+                class="flex-1 py-2 px-3 overflow-y-auto cursor-text select-text"
+                style="touch-action:pan-y;"
+                onclick={(e) => {
+                  e.stopPropagation();
+                }}
+              >
+                <div class="min-h-full w-full h-full milkdown-container">
+                  {#if store.loadedRegionMarkdown[r.pageId] !== undefined}
+                    <div
+                      use:milkdownEditor={{
+                        pageId: r.pageId,
+                        content: store.loadedRegionMarkdown[r.pageId],
+                      }}
+                      class="w-full h-full"
+                    ></div>
+                  {/if}
+                </div>
+              </div>
+              {#if !r.locked}
+                <div
+                  use:customResizable={{
+                    width: r.width,
+                    height: r.height,
+                    locked: r.locked,
+                    onResize: (w, h) => {
+                      r.width = w;
+                      r.height = h;
+                    },
+                    onResizeEnd: () => store.requestSave()
+                  }}
+                  class="absolute bottom-0 right-0 w-5 h-5 cursor-se-resize flex items-end justify-end p-1 opacity-0 hover:opacity-100 transition-opacity z-10"
+                >
+                  <div class="w-2 h-2 border-r-2 border-b-2 border-zinc-400 rounded-sm pointer-events-none"></div>
+                </div>
+              {/if}
+            </div>
+          {/each}
 
-      <!-- ✏️ DRAWING GHOST REGION -->
-      {#if store.isDrawingRegion && store.tempRegion.surfaceId === pId}
-        <div
-          class="absolute border border-zinc-400 bg-white/20 rounded-lg pointer-events-none layer-focus"
-          style="left:{store.tempRegion.x}px;top:{store.tempRegion.y}px;width:{store.tempRegion.w}px;height:{store.tempRegion.h}px"
-        ></div>
+          <!-- 🖼️ PLACED IMAGES -->
+          {#each store.loadedPages[pId].placedImages as img (img.id)}
+            {#if store.loadedImages[img.id]}
+              <img
+                src={store.loadedImages[img.id]}
+                draggable="false"
+                oncontextmenu={(e) =>
+                  openCtx(e, [
+                    {
+                      label: img.locked ? "Unlock" : "Lock",
+                      action: () => {
+                        img.locked = !img.locked;
+                        store.requestSave();
+                      },
+                    },
+                    {
+                      label: `Resize (${img.scale ?? 1}x)`,
+                      submenu: CONFIG.SCALES.map((s) => ({
+                        label: `${s}x`,
+                        action: () => {
+                          img.scale = s;
+                          store.requestSave();
+                        },
+                      })),
+                    },
+                    {
+                      label: `Opacity (${Math.round((img.opacity ?? 1) * 100)}%)`,
+                      submenu: CONFIG.OPACITIES.map((o) => ({
+                        label: `${Math.round(o * 100)}%`,
+                        action: () => {
+                          img.opacity = o;
+                          store.requestSave();
+                        },
+                      })),
+                    },
+                    {
+                      label: "Rotate",
+                      action: () => {
+                        img.rotation = ((img.rotation || 0) + 45) % 360;
+                        store.requestSave();
+                      },
+                    },
+                    {
+                      label: `Layer (${img.layerBucket || "sticker"})`,
+                      submenu: CONFIG.LAYERS.map((l) => ({
+                        label: l,
+                        action: () => {
+                          img.layerBucket = l;
+                          store.requestSave();
+                        },
+                      })),
+                    },
+                    {
+                      label: "Delete",
+                      danger: true,
+                      action: () => store.removeImage(img.id),
+                    },
+                  ])}
+                class="draggable-image layer-{img.layerBucket || 'sticker'}"
+                data-locked={img.locked}
+                alt="placed"
+                style="left:{img.left}px;top:{img.top}px;transform: rotate({img.rotation || 0}deg) scale({(img.scale ?? 1) * (zoomedImgId === img.id ? 1.25 : 1)}); opacity:{img.opacity ?? 1}; transform-origin: center;"
+                use:customDraggable={{
+                  left: img.left,
+                  top: img.top,
+                  locked: img.locked,
+                  onDrag: (x, y) => {
+                    img.left = x;
+                    img.top = y;
+                  },
+                  onDragEnd: () => store.requestSave()
+                }}
+              />
+            {/if}
+          {/each}
+
+          <!-- ✏️ DRAWING GHOST REGION -->
+          {#if store.isDrawingRegion && store.tempRegion.surfaceId === pId}
+            <div
+              class="absolute border border-zinc-400 bg-white/20 rounded-lg pointer-events-none layer-focus"
+              style="left:{store.tempRegion.x}px;top:{store.tempRegion.y}px;width:{store.tempRegion.w}px;height:{store.tempRegion.h}px"
+            ></div>
+          {/if}
+        </div>
       {/if}
     </div>
   {/each}
