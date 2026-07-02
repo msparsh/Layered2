@@ -37,5 +37,8 @@
             "target": "nsis",
             "icon": "build/icons/win/icon.ico"
         }
+    },
+    "dependencies": {
+        "@milkdown/crepe": "^7.21.2"
     }
 }

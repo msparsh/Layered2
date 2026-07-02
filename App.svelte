@@ -1,75 +1,691 @@
-<script lang="ts">import{onMount,tick}from"svelte";import type{Action}from"svelte/action";
-type BlockType="task"|"completed"|"migrated"|"scheduled"|"event"|"note"|"text"|"h1"|"h2"|"h3"|"h4"|"h5"|"h6";
-interface Block{id:string;type:BlockType;text:string;depth:number;}
-interface Region{id:string;surfaceId:string;x:number;y:number;width:number;height:number;pageId:string;locked?:boolean;paperType?:string;layerBucket?:string;}
-interface PlacedImage{id:string;pageId:string;left:number;top:number;layerBucket:string;locked?:boolean;opacity?:number;rotation?:number;scale?:number;}
-interface StickerPack{id:string;name:string;stickers:string[];}
-interface MetaState{version?:number;currentP:number;pageOrder:string[];stickers:string[];placedImages:PlacedImage[];regions:Region[];stickerPacks:StickerPack[];activePackId:string;scrolls?:number[];}
-interface LoadedSticker{id:string;src:string;}
-interface ContextMenuItem{label:string;danger?:boolean;action:(e?:MouseEvent)=>void;}
+<script lang="ts">
+import { onMount, tick } from "svelte";
+import type { Action } from "svelte/action";
+import { Crepe } from "@milkdown/crepe";
+import "@milkdown/crepe/theme/common/style.css";
+import "@milkdown/crepe/theme/frame.css";
 
-let zoomedImgId=$state<string|null>(null),stickerDrawerOpen=$state(false),loadedStickers=$state<LoadedSticker[]>([]),contextMenuVisible=$state(false),contextMenuX=$state(0),contextMenuY=$state(0),contextMenuItems=$state<ContextMenuItem[]>([]),isDrawingRegion=$state(false),tempRegion=$state({x:0,y:0,w:0,h:0,surfaceId:"" as string|null}),blockDraggingId=$state<string|null>(null),activeFocusId=$state<string|null>(null),activeCursorOffset=$state(0),focusedRegionId=$state<string|null>(null),activePackId=$state("all"),promptVisible=$state(false),promptTitle=$state(""),promptValue=$state(""),promptCallback=$state<((v:string)=>void)|null>(null),draggingStickerId=$state<string|null>(null),pointerX=$state(0),pointerY=$state(0);
-const StickerCache=new Map<string,string>(),CONFIG={BULLETS:{task:"•",completed:"✕",migrated:">",scheduled:"<",event:"○",note:"-"}as Record<string,string>,CYCLE:["task","completed","migrated","scheduled","event","note"]as BlockType[],MD_MAP:{"* ":"task","x ":"completed","> ":"migrated","< ":"scheduled","o ":"event","- ":"note","# ":"h1","## ":"h2","### ":"h3","#### ":"h4","##### ":"h5","###### ":"h6"}as Record<string,BlockType>,H_STYLES:{h1:"text-4xl font-bold mt-6 mb-2",h2:"text-3xl font-bold mt-5 mb-2",h3:"text-2xl font-bold mt-4 mb-1",h4:"text-xl font-semibold mt-3 mb-1",h5:"text-lg font-semibold mt-2 mb-1",h6:"text-base font-semibold uppercase tracking-wider mt-2 mb-1 text-zinc-500"}as Record<string,string>,SAVE_TIMEOUT_MS:500,LAYERS:["background","paper","sticker","floating","focus"],OPACITIES:[1,0.75,0.5,0.25],SCALES:[0.25,0.5,0.75,1,1.25,1.5,2,3],PAPER_TYPES:["blank","dot","ruled","graph"],INDENT_PX:28,MIN_REGION_SIZE:50,MAX_DEPTH:4};
-class BujoStore{meta=$state<MetaState>({version:4,currentP:0,pageOrder:[],stickers:[],placedImages:[],regions:[],stickerPacks:[],activePackId:"all"});pages=$state<Record<string,Block[]>>({});currentP=$state(0);loadedImages=$state<Record<string,string>>({});blockMap=new Map<string,{pageId:string;bIdx:number;block:Block}>();dirtyPages=new Set<string>();isSaving=false;needsSave=false;saveTimeout:any=null;
-async init(){const m:MetaState={version:4,currentP:0,pageOrder:[],stickers:[],placedImages:[],regions:[],stickerPacks:[],activePackId:"all",...((await FileSystemAPI.readJson("meta.json"))||{})};if(!m.pageOrder.length){m.pageOrder.push(`page-${Utils.generateId()}`,`page-${Utils.generateId()}`);await FileSystemAPI.writeJsonAtomic("meta.json",m);}this.meta=m;this.currentP=m.currentP||0;await Promise.all(m.regions.map(async(r:Region)=>{if(!this.pages[r.pageId])this.pages[r.pageId]=(await FileSystemAPI.readJson(`pages/${r.pageId}.json`))||[this.createBlock()];}));this.rebuildIndex();}
-requestSave(){clearTimeout(this.saveTimeout);this.saveTimeout=setTimeout(()=>this.executeSave(),CONFIG.SAVE_TIMEOUT_MS);}
-async executeSave(){if(this.isSaving)return(this.needsSave=true);this.isSaving=true;this.needsSave=false;try{await this.cleanEmptySpreads();this.meta.currentP=this.currentP;await FileSystemAPI.writeJsonAtomic("meta.json",$state.snapshot(this.meta));for(const p of Array.from(this.dirtyPages)){if(this.pages[p])await FileSystemAPI.writeJsonAtomic(`pages/${p}.json`,$state.snapshot(this.pages[p]));}this.dirtyPages.clear();}catch(e){console.error(e);}finally{this.isSaving=false;if(this.needsSave)this.executeSave();}}
-createBlock=(text="",depth=0,type:BlockType="text"):Block=>({id:Utils.generateId(),type,text,depth});
-rebuildIndex(){this.blockMap.clear();Object.entries(this.pages).forEach(([p,b])=>b.forEach((blk,i)=>this.blockMap.set(blk.id,{pageId:p,bIdx:i,block:blk})));}
-getBlockCoords=(id:string)=>this.blockMap.get(id)||null;
-async cleanEmptySpreads(){let c=false;for(let i=this.meta.pageOrder.length-1;i>this.currentP;i--){const pId=this.meta.pageOrder[i];if(!this.meta.placedImages.some((img)=>img.pageId===pId)&&!this.meta.regions.some((r)=>r.surfaceId===pId)){delete this.pages[pId];this.meta.pageOrder.splice(i,1);this.meta.scrolls?.splice(i,1);c=true;}}if(this.currentP>=this.meta.pageOrder.length){this.currentP=Math.max(0,this.meta.pageOrder.length-1);c=true;}if(c)this.rebuildIndex();return c;}
-async ensureEnoughPages(){if(this.currentP>=this.meta.pageOrder.length){this.meta.pageOrder.push(`page-${Utils.generateId()}`);this.rebuildIndex();await FileSystemAPI.writeJsonAtomic("meta.json",$state.snapshot(this.meta));return true;}return false;}
-updateBlock(id:string,u:Partial<Block>){const c=this.getBlockCoords(id);if(c){Object.assign(c.block,u);this.dirtyPages.add(c.pageId);this.requestSave();}}
-addBlock(nb:Block,id:string){const c=this.getBlockCoords(id);if(c){this.pages[c.pageId].splice(c.bIdx+1,0,nb);this.rebuildIndex();this.dirtyPages.add(c.pageId);this.requestSave();}}
-removeBlock(id:string){const c=this.getBlockCoords(id);if(c){this.pages[c.pageId].splice(c.bIdx,1);this.rebuildIndex();this.dirtyPages.add(c.pageId);this.requestSave();}}
-moveBlockDOM(id:string,tId:string,ia:boolean){const src=this.getBlockCoords(id),tgt=this.getBlockCoords(tId);if(!src||!tgt)return;const[m]=this.pages[src.pageId].splice(src.bIdx,1),sA=src.pageId===tgt.pageId;this.pages[tgt.pageId].splice(tgt.bIdx-(sA&&src.bIdx<tgt.bIdx?1:0)+(ia?1:0),0,m);this.rebuildIndex();this.dirtyPages.add(src.pageId);if(!sA)this.dirtyPages.add(tgt.pageId);this.requestSave();}
-async changePage(d:number,isR=true){const nP=isR?this.currentP+d:d;if(nP<0)return;this.currentP=nP;await this.ensureEnoughPages();window.scrollTo({top:0,behavior:"smooth"});await this.executeSave();}
-async spawnImage(src:string,cX?:number,cY?:number){const id=Utils.generateId();await FileSystemAPI.writeJsonAtomic(`images/${id}.json`,{src});const img:PlacedImage={id,pageId:this.meta.pageOrder[this.currentP],left:cX!==undefined?cX-50:100,top:cY!==undefined?cY-50:100,layerBucket:"sticker"};this.meta.placedImages.push(img);await this.executeSave();this.renderImage(img);}
-async renderImage(d:PlacedImage){const f=await FileSystemAPI.readJson(`images/${d.id}.json`);if(f?.src)this.loadedImages[d.id]=f.src;}
-restoreAllImages(){this.meta.placedImages.forEach((d)=>this.renderImage(d));}
-async removeImage(id:string){const idx=this.meta.placedImages.findIndex((i)=>i.id===id);if(idx!==-1){this.meta.placedImages.splice(idx,1);await this.executeSave();delete this.loadedImages[id];FileSystemAPI.trashJson(`images/${id}.json`);}}
-async removeRegion(id:string){const idx=this.meta.regions.findIndex((r)=>r.id===id);if(idx!==-1){const r=this.meta.regions[idx];this.meta.regions.splice(idx,1);delete this.pages[r.pageId];this.rebuildIndex();await this.executeSave();await FileSystemAPI.trashJson(`pages/${r.pageId}.json`);}}}
-const store=new BujoStore();
-interface PointerActionParams{onDown?:(e:PointerEvent)=>void;onMove?:(e:PointerEvent)=>void;onUp?:(e:PointerEvent)=>void;ignore?:(e:PointerEvent)=>boolean;}
-const pointerAction:Action<HTMLElement,PointerActionParams>=(node,{onDown,onMove,onUp,ignore})=>{let a=false,d=(e:PointerEvent)=>{if(e.button!==0||ignore?.(e))return;a=true;node.setPointerCapture(e.pointerId);onDown?.(e);},m=(e:PointerEvent)=>{if(a)onMove?.(e);},u=(e:PointerEvent)=>{if(!a)return;a=false;node.releasePointerCapture(e.pointerId);onUp?.(e);};const hs=[d,m,u,u],evs=["pointerdown","pointermove","pointerup","pointercancel"]as const;evs.forEach((ev,i)=>node.addEventListener(ev,hs[i]));return{destroy:()=>evs.forEach((ev,i)=>node.removeEventListener(ev,hs[i]))};};
-interface DragBehaviorParams{getObj:()=>any;keys:string[];min?:number[];}
-const dragBehavior:Action<HTMLElement,DragBehaviorParams>=(node,{getObj,keys,min=[-Infinity,-Infinity]}):any=>{let sX:number,sY:number,iX:number,iY:number;return pointerAction(node,{ignore:()=>getObj()?.locked,onDown:(e:PointerEvent)=>{const o=getObj();if(o){sX=e.clientX;sY=e.clientY;iX=o[keys[0]];if(keys.length>1)iY=o[keys[1]];e.preventDefault();e.stopPropagation();}},onMove:(e:PointerEvent)=>{const o=getObj();if(o){o[keys[0]]=Math.max(min[0],iX+e.clientX-sX);if(keys.length>1)o[keys[1]]=Math.max(min[1]||-Infinity,iY+e.clientY-sY);}},onUp:()=>store.requestSave(),});};
-const Utils={generateId:()=>crypto.randomUUID(),clamp:(v:number,m:number,x:number)=>Math.max(m,Math.min(x,v)),calcRectOffset:(cX:number,cY:number,r:DOMRect)=>({x:cX-r.left,y:cY-r.top}),getBlockClasses:(t:string)=>`flex-1 outline-none whitespace-pre-wrap min-h-[1.5rem] bullet-text transition-all duration-300 ${CONFIG.H_STYLES[t]||"text-[1.05rem] leading-relaxed"} ${t==="completed"?"line-through text-zinc-400 opacity-60":["migrated","scheduled"].includes(t)?"italic text-zinc-500":""}`.trim(),getHandleClasses:(isB:boolean)=>`absolute -left-8 top-0.5 w-7 h-7 flex items-center justify-center bullet-handle ${isB?"opacity-100 text-zinc-500":"opacity-0 text-zinc-300"} group-hover:opacity-100 hover:!text-black font-bold transition-all`,getNextType:(cT:BlockType)=>CONFIG.CYCLE[(CONFIG.CYCLE.indexOf(cT)+1)%CONFIG.CYCLE.length]||"task",getNextLayer:(cL:string,d:number)=>{const idx=Math.max(0,CONFIG.LAYERS.indexOf(cL));return CONFIG.LAYERS[(idx+d+CONFIG.LAYERS.length)%CONFIG.LAYERS.length];},getNextOpacity:(cO:number)=>CONFIG.OPACITIES[(CONFIG.OPACITIES.indexOf(cO??1)+1)%CONFIG.OPACITIES.length],getNextScale:(cS:number)=>{const idx=Math.max(0,CONFIG.SCALES.indexOf(cS??1));return CONFIG.SCALES[(idx+1)%CONFIG.SCALES.length];},qsa:(s:string)=>document.querySelectorAll(s)};
-const api=(window as any).electronAPI,memFs=new Map<string,any>(),FileSystemAPI={readJson:async(p:string)=>api?await api.readJson(p):(memFs.get(p)??null),writeJsonAtomic:async(p:string,d:any)=>api?await api.writeJsonAtomic(p,d):memFs.set(p,d),trashJson:async(p:string)=>api?await api.trashJson(p):memFs.delete(p)};
+interface Region {
+  id: string;
+  surfaceId: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  pageId: string;
+  locked?: boolean;
+  paperType?: string;
+  layerBucket?: string;
+}
 
-const StickerBookManager={async update(fn:()=>void){fn();await store.executeSave();await this.render();},async saveSticker(b64:string){for(const [,v] of StickerCache.entries())if(v===b64)return;const id=Utils.generateId();await FileSystemAPI.writeJsonAtomic(`images/sticker-${id}.json`,{src:b64});StickerCache.set(id,b64);this.update(()=>{store.meta.stickers=[...(store.meta.stickers||[]),id];if(activePackId!=="all")store.meta.stickerPacks?.forEach((p)=>{if(p.id===activePackId)p.stickers=[...(p.stickers||[]),id];});});},async removeSticker(id:string){this.update(()=>{store.meta.stickers=store.meta.stickers?.filter((s)=>s!==id);store.meta.stickerPacks?.forEach((p)=>(p.stickers=p.stickers?.filter((s)=>s!==id)));});StickerCache.delete(id);await FileSystemAPI.trashJson(`images/sticker-${id}.json`);},async loadSticker(id:string){if(StickerCache.has(id))return{id,src:StickerCache.get(id)};const f=await FileSystemAPI.readJson(`images/sticker-${id}.json`);if(f?.src){StickerCache.set(id,f.src);return{id,src:f.src};}return null;},
-async render(){
-  const packed = new Set(store.meta.stickerPacks?.flatMap((p) => p.stickers || []) || []);
-  
-  const l = activePackId === "all" 
-    ? store.meta.stickers?.filter(id => !packed.has(id)) 
-    : store.meta.stickerPacks?.find((p) => p.id === activePackId)?.stickers;
+interface PlacedImage {
+  id: string;
+  pageId: string;
+  left: number;
+  top: number;
+  layerBucket: string;
+  locked?: boolean;
+  opacity?: number;
+  rotation?: number;
+  scale?: number;
+}
+
+interface StickerPack {
+  id: string;
+  name: string;
+  stickers: string[];
+}
+
+interface MetaState {
+  version?: number;
+  currentP: number;
+  pageOrder: string[];
+  stickers: string[];
+  placedImages: PlacedImage[];
+  regions: Region[];
+  stickerPacks: StickerPack[];
+  activePackId: string;
+  scrolls?: number[];
+}
+
+interface LoadedSticker {
+  id: string;
+  src: string;
+}
+
+interface ContextMenuItem {
+  label: string;
+  danger?: boolean;
+  action: (e?: MouseEvent) => void;
+}
+
+let zoomedImgId = $state<string | null>(null);
+let stickerDrawerOpen = $state(false);
+let loadedStickers = $state<LoadedSticker[]>([]);
+let contextMenuVisible = $state(false);
+let contextMenuX = $state(0);
+let contextMenuY = $state(0);
+let contextMenuItems = $state<ContextMenuItem[]>([]);
+let isDrawingRegion = $state(false);
+let tempRegion = $state({ x: 0, y: 0, w: 0, h: 0, surfaceId: "" as string | null });
+let activePackId = $state("all");
+let promptVisible = $state(false);
+let promptTitle = $state("");
+let promptValue = $state("");
+let promptCallback = $state<((v: string) => void) | null>(null);
+let draggingStickerId = $state<string | null>(null);
+let pointerX = $state(0);
+let pointerY = $state(0);
+
+const StickerCache = new Map<string, string>();
+const CONFIG = {
+  SAVE_TIMEOUT_MS: 500,
+  LAYERS: ["background", "paper", "sticker", "floating", "focus"],
+  OPACITIES: [1, 0.75, 0.5, 0.25],
+  SCALES: [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3],
+  PAPER_TYPES: ["blank", "dot", "ruled", "graph"],
+  MIN_REGION_SIZE: 50,
+};
+
+function blocksToMarkdown(blocks: any[]): string {
+  if (!Array.isArray(blocks)) return "";
+  return blocks.map(b => {
+    let prefix = "";
+    if (b.type === "h1") prefix = "# ";
+    else if (b.type === "h2") prefix = "## ";
+    else if (b.type === "h3") prefix = "### ";
+    else if (b.type === "h4") prefix = "#### ";
+    else if (b.type === "h5") prefix = "##### ";
+    else if (b.type === "h6") prefix = "###### ";
+    else if (b.type === "task") prefix = "- [ ] ";
+    else if (b.type === "completed") prefix = "- [x] ";
+    else if (b.type === "note") prefix = "- ";
+    else if (b.type === "migrated") prefix = "> ";
+    else if (b.type === "scheduled") prefix = "< ";
+    else if (b.type === "event") prefix = "- ";
     
-  loadedStickers = (await Promise.all((l || []).map((id) => this.loadSticker(id)))).filter(Boolean) as LoadedSticker[];
-},
+    const indent = "  ".repeat(b.depth || 0);
+    return indent + prefix + (b.text || "");
+  }).join("\n");
+}
 
-async createPack(name:string){if(!name?.trim())return;const id=`pack-${Utils.generateId()}`;this.update(()=>{store.meta.stickerPacks=[...(store.meta.stickerPacks||[]),{id,name:name.trim(),stickers:[]}];store.meta.activePackId=activePackId=id;});},async renamePack(pId:string,name:string){this.update(()=>store.meta.stickerPacks?.forEach((p)=>{if(p.id===pId)p.name=name.trim();}));},async deletePack(pId:string){this.update(()=>{store.meta.stickerPacks=store.meta.stickerPacks?.filter((p)=>p.id!==pId);if(activePackId===pId)store.meta.activePackId=activePackId="all";});},async moveStickerToPack(sId:string,pId:string){this.update(()=>{store.meta.stickerPacks?.forEach((pack)=>{if(pack.stickers)pack.stickers=pack.stickers.filter((id)=>id!==sId);});store.meta.stickerPacks?.forEach((pack)=>{if(pack.id===pId)pack.stickers=[...(pack.stickers||[]),sId];});});},async removeStickerFromPack(sId:string,pId:string){this.update(()=>{store.meta.stickerPacks?.forEach((pack)=>{if(pack.id===pId&&pack.stickers)pack.stickers=pack.stickers.filter((id)=>id!==sId);});});},reorderSticker(sId:string,tId:string){if(sId===tId)return;const sIdx=loadedStickers.findIndex((x)=>x.id===sId),tIdx=loadedStickers.findIndex((x)=>x.id===tId);if(sIdx>-1&&tIdx>-1){const[m]=loadedStickers.splice(sIdx,1);loadedStickers.splice(tIdx,0,m);loadedStickers=[...loadedStickers];const arr=activePackId==="all"?store.meta.stickers:store.meta.stickerPacks?.find((p)=>p.id===activePackId)?.stickers;if(arr){arr.splice(arr.indexOf(sId),1);arr.splice(arr.indexOf(tId),0,sId);}store.requestSave();}}};
-const RegionManager={startX:0,startY:0,surfaceId:null as string|null,start(e:PointerEvent){const w=(e.target as HTMLElement).closest(".page-wrapper")as HTMLElement;if(!w)return;isDrawingRegion=true;document.body.style.userSelect="none";this.surfaceId=w.dataset.pageId||null;const{x,y}=Utils.calcRectOffset(e.clientX,e.clientY,w.getBoundingClientRect());this.startX=x;this.startY=y;tempRegion={x,y,w:0,h:0,surfaceId:this.surfaceId};},draw(e:PointerEvent){if(!isDrawingRegion)return;const w=([...Utils.qsa(".page-wrapper")]as HTMLElement[]).find((w)=>w.dataset.pageId===this.surfaceId);if(!w)return;const{x,y}=Utils.calcRectOffset(e.clientX,e.clientY,w.getBoundingClientRect());tempRegion={...tempRegion,x:Math.min(this.startX,x),y:Math.min(this.startY,y),w:Math.abs(x-this.startX),h:Math.abs(y-this.startY)};},async stop(){if(!isDrawingRegion)return;isDrawingRegion=false;document.body.style.userSelect="";if(tempRegion.surfaceId&&tempRegion.w>CONFIG.MIN_REGION_SIZE&&tempRegion.h>CONFIG.MIN_REGION_SIZE){const pId=`page-${Utils.generateId()}`,nb=store.createBlock();store.meta.regions.push({id:Utils.generateId(),surfaceId:tempRegion.surfaceId,x:tempRegion.x,y:tempRegion.y,width:tempRegion.w,height:tempRegion.h,pageId:pId,paperType:"blank",layerBucket:"paper"});store.pages[pId]=[nb];store.rebuildIndex();store.dirtyPages.add(pId);await store.executeSave();activeFocusId=nb.id;activeCursorOffset=0;}}};
-const EditorEngine={update(id:string,u:Partial<Block>){store.updateBlock(id,u);},indent(id:string,d:number){const c=store.getBlockCoords(id);if(c)this.update(id,{depth:Utils.clamp(c.block.depth+d,0,CONFIG.MAX_DEPTH)});},updateText(id:string,cT:string){const c=store.getBlockCoords(id);if(!c)return;let pT=cT.replace(/\u00A0/g," "),md=Object.entries(CONFIG.MD_MAP).find(([p])=>pT.startsWith(p));if(md){this.update(id,{text:pT.substring(md[0].length),type:md[1]});activeFocusId=id;activeCursorOffset=0;}else this.update(id,{text:cT});},split(id:string,cP:number){const c=store.getBlockCoords(id);if(!c)return;const{block:b}=c,nT=b.type.startsWith("h")?"text":b.type,nb=store.createBlock(b.text.slice(cP),b.depth,nT);this.update(id,{text:b.text.slice(0,cP)});store.addBlock(nb,id);activeFocusId=nb.id;activeCursorOffset=0;},merge(id:string){const c=store.getBlockCoords(id);if(!c||c.bIdx===0)return;const p=store.pages[c.pageId][c.bIdx-1],mP=p.text.length;this.update(p.id,{text:p.text+c.block.text});store.removeBlock(id);activeFocusId=p.id;activeCursorOffset=mP;},nav(id:string,d:number){const c=store.getBlockCoords(id),t=c&&store.pages[c.pageId][c.bIdx+d];if(t){activeFocusId=t.id;activeCursorOffset=0;}}};
-const autoResize:Action<HTMLTextAreaElement>=(node)=>{const r=()=>{node.style.height="auto";node.style.height=node.scrollHeight+"px";};node.addEventListener("input",r);setTimeout(r,0);return{update:r,destroy:()=>node.removeEventListener("input",r)};};
-const autoFocus:Action<HTMLTextAreaElement,{id:string;focusId:string|null;offset:number}>=(node,{id,focusId,offset})=>{const doFocus=(fId:string|null,off:number)=>{if(id===fId)tick().then(()=>{node.focus();const tP=Math.min(off,node.value.length);node.setSelectionRange(tP,tP);});};doFocus(focusId,offset);return{update(params){doFocus(params.focusId,params.offset);}};};
-const globalKey=(e:KeyboardEvent)=>{const isI=["TEXTAREA","INPUT"].includes(document.activeElement?.tagName||""),l=e.key==="ArrowLeft",r=e.key==="ArrowRight";if((l||r)&&(!isI||e.altKey)){e.preventDefault();store.changePage(l?-1:1,true);}};
-const showCustomPrompt=(t:string,d:string,cb:(v:string)=>void)=>{promptTitle=t;promptValue=d||"";promptCallback=cb;promptVisible=true;setTimeout(()=>(document.getElementById("custom-prompt-input")as HTMLInputElement)?.select(),50);};
-const openCtx=(e:MouseEvent,items:ContextMenuItem[])=>{e.preventDefault();e.stopPropagation();contextMenuX=e.clientX;contextMenuY=e.clientY;contextMenuItems=items;contextMenuVisible=true;};
-const openSub=(items:ContextMenuItem[])=>openCtx({clientX:contextMenuX,clientY:contextMenuY,preventDefault:()=>{},stopPropagation:()=>{}} as any,items);
-const tDrop=(e:PointerEvent,on:number)=>{if(draggingStickerId&&draggingStickerId!=="all")(e.currentTarget as HTMLElement).classList[on?"add":"remove"]("!bg-zinc-800","!text-white","scale-105","!border-zinc-800");};
-const packBtnClass=(id:string)=>`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all duration-200 active:scale-95 border ${activePackId===id?"bg-zinc-900 text-white border-zinc-900 shadow-sm":"bg-zinc-50 hover:bg-zinc-100 text-zinc-600 border-zinc-200/50"}`;
-const globalPaste=(e:ClipboardEvent)=>{const f=Array.from(e.clipboardData?.items||[]).find((i)=>i.type.startsWith("image/"))?.getAsFile();if(f){e.preventDefault();const r=new FileReader();r.onload=(ev)=>{const b64=ev.target?.result as string;StickerBookManager.saveSticker(b64);if(!stickerDrawerOpen)store.spawnImage(b64,pointerX||window.innerWidth/2,pointerY||window.innerHeight/2);};r.readAsDataURL(f);}};
-$effect(()=>{activePackId;StickerBookManager.render();});
-onMount(()=>{let d=false;(async()=>{await store.init();if(d)return;activePackId=store.meta.activePackId||"all";StickerBookManager.render();store.restoreAllImages();})();window.addEventListener("beforeunload",()=>store.saveTimeout&&store.executeSave());return()=>(d=true);});
+class BujoStore {
+  meta = $state<MetaState>({
+    version: 4,
+    currentP: 0,
+    pageOrder: [],
+    stickers: [],
+    placedImages: [],
+    regions: [],
+    stickerPacks: [],
+    activePackId: "all"
+  });
+  pages = $state<Record<string, string>>({});
+  currentP = $state(0);
+  loadedImages = $state<Record<string, string>>({});
+  dirtyPages = new Set<string>();
+  isSaving = false;
+  needsSave = false;
+  saveTimeout: any = null;
+
+  async init() {
+    const m: MetaState = {
+      version: 4,
+      currentP: 0,
+      pageOrder: [],
+      stickers: [],
+      placedImages: [],
+      regions: [],
+      stickerPacks: [],
+      activePackId: "all",
+      ...((await FileSystemAPI.readJson("meta.json")) || {})
+    };
+    if (!m.pageOrder.length) {
+      m.pageOrder.push(`page-${Utils.generateId()}`, `page-${Utils.generateId()}`);
+      await FileSystemAPI.writeJsonAtomic("meta.json", m);
+    }
+    this.meta = m;
+    this.currentP = m.currentP || 0;
+    await Promise.all(m.regions.map(async (r: Region) => {
+      if (this.pages[r.pageId] === undefined) {
+        const raw = await FileSystemAPI.readJson(`pages/${r.pageId}.json`);
+        let md = "";
+        if (raw) {
+          if (Array.isArray(raw)) {
+            md = blocksToMarkdown(raw);
+          } else if (typeof raw === "string") {
+            md = raw;
+          } else if (raw.markdown !== undefined) {
+            md = raw.markdown;
+          }
+        }
+        this.pages[r.pageId] = md;
+      }
+    }));
+  }
+
+  requestSave() {
+    clearTimeout(this.saveTimeout);
+    this.saveTimeout = setTimeout(() => this.executeSave(), CONFIG.SAVE_TIMEOUT_MS);
+  }
+
+  async executeSave() {
+    if (this.isSaving) return (this.needsSave = true);
+    this.isSaving = true;
+    this.needsSave = false;
+    try {
+      await this.cleanEmptySpreads();
+      this.meta.currentP = this.currentP;
+      await FileSystemAPI.writeJsonAtomic("meta.json", $state.snapshot(this.meta));
+      for (const p of Array.from(this.dirtyPages)) {
+        if (this.pages[p] !== undefined) {
+          await FileSystemAPI.writeJsonAtomic(`pages/${p}.json`, { markdown: this.pages[p] });
+        }
+      }
+      this.dirtyPages.clear();
+    } catch (e) {
+      console.error(e);
+    } finally {
+      this.isSaving = false;
+      if (this.needsSave) this.executeSave();
+    }
+  }
+
+  async cleanEmptySpreads() {
+    let c = false;
+    for (let i = this.meta.pageOrder.length - 1; i > this.currentP; i--) {
+      const pId = this.meta.pageOrder[i];
+      if (!this.meta.placedImages.some((img) => img.pageId === pId) && !this.meta.regions.some((r) => r.surfaceId === pId)) {
+        delete this.pages[pId];
+        this.meta.pageOrder.splice(i, 1);
+        this.meta.scrolls?.splice(i, 1);
+        c = true;
+      }
+    }
+    if (this.currentP >= this.meta.pageOrder.length) {
+      this.currentP = Math.max(0, this.meta.pageOrder.length - 1);
+      c = true;
+    }
+    return c;
+  }
+
+  async ensureEnoughPages() {
+    if (this.currentP >= this.meta.pageOrder.length) {
+      this.meta.pageOrder.push(`page-${Utils.generateId()}`);
+      await FileSystemAPI.writeJsonAtomic("meta.json", $state.snapshot(this.meta));
+      return true;
+    }
+    return false;
+  }
+
+  async changePage(d: number, isR = true) {
+    const nP = isR ? this.currentP + d : d;
+    if (nP < 0) return;
+    this.currentP = nP;
+    await this.ensureEnoughPages();
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    await this.executeSave();
+  }
+
+  async spawnImage(src: string, cX?: number, cY?: number) {
+    const id = Utils.generateId();
+    await FileSystemAPI.writeJsonAtomic(`images/${id}.json`, { src });
+    const img: PlacedImage = {
+      id,
+      pageId: this.meta.pageOrder[this.currentP],
+      left: cX !== undefined ? cX - 50 : 100,
+      top: cY !== undefined ? cY - 50 : 100,
+      layerBucket: "sticker"
+    };
+    this.meta.placedImages.push(img);
+    await this.executeSave();
+    this.renderImage(img);
+  }
+
+  async renderImage(d: PlacedImage) {
+    const f = await FileSystemAPI.readJson(`images/${d.id}.json`);
+    if (f?.src) this.loadedImages[d.id] = f.src;
+  }
+
+  restoreAllImages() {
+    this.meta.placedImages.forEach((d) => this.renderImage(d));
+  }
+
+  async removeImage(id: string) {
+    const idx = this.meta.placedImages.findIndex((i) => i.id === id);
+    if (idx !== -1) {
+      this.meta.placedImages.splice(idx, 1);
+      await this.executeSave();
+      delete this.loadedImages[id];
+      FileSystemAPI.trashJson(`images/${id}.json`);
+    }
+  }
+
+  async removeRegion(id: string) {
+    const idx = this.meta.regions.findIndex((r) => r.id === id);
+    if (idx !== -1) {
+      const r = this.meta.regions[idx];
+      this.meta.regions.splice(idx, 1);
+      delete this.pages[r.pageId];
+      await this.executeSave();
+      await FileSystemAPI.trashJson(`pages/${r.pageId}.json`);
+    }
+  }
+}
+
+const store = new BujoStore();
+
+interface PointerActionParams {
+  onDown?: (e: PointerEvent) => void;
+  onMove?: (e: PointerEvent) => void;
+  onUp?: (e: PointerEvent) => void;
+  ignore?: (e: PointerEvent) => boolean;
+}
+
+const pointerAction: Action<HTMLElement, PointerActionParams> = (node, { onDown, onMove, onUp, ignore }) => {
+  let a = false;
+  const d = (e: PointerEvent) => {
+    if (e.button !== 0 || ignore?.(e)) return;
+    a = true;
+    node.setPointerCapture(e.pointerId);
+    onDown?.(e);
+  };
+  const m = (e: PointerEvent) => {
+    if (a) onMove?.(e);
+  };
+  const u = (e: PointerEvent) => {
+    if (!a) return;
+    a = false;
+    node.releasePointerCapture(e.pointerId);
+    onUp?.(e);
+  };
+  const hs = [d, m, u, u];
+  const evs = ["pointerdown", "pointermove", "pointerup", "pointercancel"] as const;
+  evs.forEach((ev, i) => node.addEventListener(ev, hs[i]));
+  return { destroy: () => evs.forEach((ev, i) => node.removeEventListener(ev, hs[i])) };
+};
+
+interface DragBehaviorParams {
+  getObj: () => any;
+  keys: string[];
+  min?: number[];
+}
+
+const dragBehavior: Action<HTMLElement, DragBehaviorParams> = (node, { getObj, keys, min = [-Infinity, -Infinity] }): any => {
+  let sX: number, sY: number, iX: number, iY: number;
+  return pointerAction(node, {
+    ignore: () => getObj()?.locked,
+    onDown: (e: PointerEvent) => {
+      const o = getObj();
+      if (o) {
+        sX = e.clientX;
+        sY = e.clientY;
+        iX = o[keys[0]];
+        if (keys.length > 1) iY = o[keys[1]];
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    },
+    onMove: (e: PointerEvent) => {
+      const o = getObj();
+      if (o) {
+        o[keys[0]] = Math.max(min[0], iX + e.clientX - sX);
+        if (keys.length > 1) o[keys[1]] = Math.max(min[1] || -Infinity, iY + e.clientY - sY);
+      }
+    },
+    onUp: () => store.requestSave(),
+  });
+};
+
+const Utils = {
+  generateId: () => crypto.randomUUID(),
+  clamp: (v: number, m: number, x: number) => Math.max(m, Math.min(x, v)),
+  calcRectOffset: (cX: number, cY: number, r: DOMRect) => ({ x: cX - r.left, y: cY - r.top }),
+  getNextLayer: (cL: string, d: number) => {
+    const idx = Math.max(0, CONFIG.LAYERS.indexOf(cL));
+    return CONFIG.LAYERS[(idx + d + CONFIG.LAYERS.length) % CONFIG.LAYERS.length];
+  },
+  getNextOpacity: (cO: number) => CONFIG.OPACITIES[(CONFIG.OPACITIES.indexOf(cO ?? 1) + 1) % CONFIG.OPACITIES.length],
+  getNextScale: (cS: number) => {
+    const idx = Math.max(0, CONFIG.SCALES.indexOf(cS ?? 1));
+    return CONFIG.SCALES[(idx + 1) % CONFIG.SCALES.length];
+  },
+  qsa: (s: string) => document.querySelectorAll(s)
+};
+
+const api = (window as any).electronAPI;
+const memFs = new Map<string, any>();
+const FileSystemAPI = {
+  readJson: async (p: string) => api ? await api.readJson(p) : (memFs.get(p) ?? null),
+  writeJsonAtomic: async (p: string, d: any) => api ? await api.writeJsonAtomic(p, d) : memFs.set(p, d),
+  trashJson: async (p: string) => api ? await api.trashJson(p) : memFs.delete(p)
+};
+
+const StickerBookManager = {
+  async update(fn: () => void) {
+    fn();
+    await store.executeSave();
+    await this.render();
+  },
+  async saveSticker(b64: string) {
+    for (const [, v] of StickerCache.entries()) if (v === b64) return;
+    const id = Utils.generateId();
+    await FileSystemAPI.writeJsonAtomic(`images/sticker-${id}.json`, { src: b64 });
+    StickerCache.set(id, b64);
+    this.update(() => {
+      store.meta.stickers = [...(store.meta.stickers || []), id];
+      if (activePackId !== "all") store.meta.stickerPacks?.forEach((p) => {
+        if (p.id === activePackId) p.stickers = [...(p.stickers || []), id];
+      });
+    });
+  },
+  async removeSticker(id: string) {
+    this.update(() => {
+      store.meta.stickers = store.meta.stickers?.filter((s) => s !== id);
+      store.meta.stickerPacks?.forEach((p) => (p.stickers = p.stickers?.filter((s) => s !== id)));
+    });
+    StickerCache.delete(id);
+    await FileSystemAPI.trashJson(`images/sticker-${id}.json`);
+  },
+  async loadSticker(id: string) {
+    if (StickerCache.has(id)) return { id, src: StickerCache.get(id) };
+    const f = await FileSystemAPI.readJson(`images/sticker-${id}.json`);
+    if (f?.src) {
+      StickerCache.set(id, f.src);
+      return { id, src: f.src };
+    }
+    return null;
+  },
+  async render() {
+    const packed = new Set(store.meta.stickerPacks?.flatMap((p) => p.stickers || []) || []);
+    const l = activePackId === "all"
+      ? store.meta.stickers?.filter(id => !packed.has(id))
+      : store.meta.stickerPacks?.find((p) => p.id === activePackId)?.stickers;
+    loadedStickers = (await Promise.all((l || []).map((id) => this.loadSticker(id)))).filter(Boolean) as LoadedSticker[];
+  },
+  async createPack(name: string) {
+    if (!name?.trim()) return;
+    const id = `pack-${Utils.generateId()}`;
+    this.update(() => {
+      store.meta.stickerPacks = [...(store.meta.stickerPacks || []), { id, name: name.trim(), stickers: [] }];
+      store.meta.activePackId = activePackId = id;
+    });
+  },
+  async renamePack(pId: string, name: string) {
+    this.update(() => store.meta.stickerPacks?.forEach((p) => {
+      if (p.id === pId) p.name = name.trim();
+    }));
+  },
+  async deletePack(pId: string) {
+    this.update(() => {
+      store.meta.stickerPacks = store.meta.stickerPacks?.filter((p) => p.id !== pId);
+      if (activePackId === pId) store.meta.activePackId = activePackId = "all";
+    });
+  },
+  async moveStickerToPack(sId: string, pId: string) {
+    this.update(() => {
+      store.meta.stickerPacks?.forEach((pack) => {
+        if (pack.stickers) pack.stickers = pack.stickers.filter((id) => id !== sId);
+      });
+      store.meta.stickerPacks?.forEach((pack) => {
+        if (pack.id === pId) pack.stickers = [...(pack.stickers || []), sId];
+      });
+    });
+  },
+  async removeStickerFromPack(sId: string, pId: string) {
+    this.update(() => {
+      store.meta.stickerPacks?.forEach((pack) => {
+        if (pack.id === pId && pack.stickers) pack.stickers = pack.stickers.filter((id) => id !== sId);
+      });
+    });
+  },
+  reorderSticker(sId: string, tId: string) {
+    if (sId === tId) return;
+    const sIdx = loadedStickers.findIndex((x) => x.id === sId), tIdx = loadedStickers.findIndex((x) => x.id === tId);
+    if (sIdx > -1 && tIdx > -1) {
+      const [m] = loadedStickers.splice(sIdx, 1);
+      loadedStickers.splice(tIdx, 0, m);
+      loadedStickers = [...loadedStickers];
+      const arr = activePackId === "all" ? store.meta.stickers : store.meta.stickerPacks?.find((p) => p.id === activePackId)?.stickers;
+      if (arr) {
+        arr.splice(arr.indexOf(sId), 1);
+        arr.splice(arr.indexOf(tId), 0, sId);
+      }
+      store.requestSave();
+    }
+  }
+};
+
+const RegionManager = {
+  startX: 0,
+  startY: 0,
+  surfaceId: null as string | null,
+  start(e: PointerEvent) {
+    const w = (e.target as HTMLElement).closest(".page-wrapper") as HTMLElement;
+    if (!w) return;
+    isDrawingRegion = true;
+    document.body.style.userSelect = "none";
+    this.surfaceId = w.dataset.pageId || null;
+    const { x, y } = Utils.calcRectOffset(e.clientX, e.clientY, w.getBoundingClientRect());
+    this.startX = x;
+    this.startY = y;
+    tempRegion = { x, y, w: 0, h: 0, surfaceId: this.surfaceId };
+  },
+  draw(e: PointerEvent) {
+    if (!isDrawingRegion) return;
+    const w = ([...Utils.qsa(".page-wrapper")] as HTMLElement[]).find((w) => w.dataset.pageId === this.surfaceId);
+    if (!w) return;
+    const { x, y } = Utils.calcRectOffset(e.clientX, e.clientY, w.getBoundingClientRect());
+    tempRegion = {
+      ...tempRegion,
+      x: Math.min(this.startX, x),
+      y: Math.min(this.startY, y),
+      w: Math.abs(x - this.startX),
+      h: Math.abs(y - this.startY)
+    };
+  },
+  async stop() {
+    if (!isDrawingRegion) return;
+    isDrawingRegion = false;
+    document.body.style.userSelect = "";
+    if (tempRegion.surfaceId && tempRegion.w > CONFIG.MIN_REGION_SIZE && tempRegion.h > CONFIG.MIN_REGION_SIZE) {
+      const pId = `page-${Utils.generateId()}`;
+      store.meta.regions.push({
+        id: Utils.generateId(),
+        surfaceId: tempRegion.surfaceId,
+        x: tempRegion.x,
+        y: tempRegion.y,
+        width: tempRegion.w,
+        height: tempRegion.h,
+        pageId: pId,
+        paperType: "blank",
+        layerBucket: "paper"
+      });
+      store.pages[pId] = "";
+      store.dirtyPages.add(pId);
+      await store.executeSave();
+    }
+  }
+};
+
+function milkdownEditor(node: HTMLElement, params: { pageId: string; content: string }) {
+  let crepeInstance: Crepe | null = null;
+  let isUpdating = false;
+
+  crepeInstance = new Crepe({
+    root: node,
+    defaultValue: params.content,
+  });
+
+  crepeInstance.create().then(() => {
+    if (!crepeInstance) return;
+    crepeInstance.on((listener) => {
+      listener.markdownUpdated((ctx, markdown) => {
+        if (isUpdating) return;
+        store.pages[params.pageId] = markdown;
+        store.dirtyPages.add(params.pageId);
+        store.requestSave();
+      });
+    });
+  });
+
+  return {
+    update(newParams: { pageId: string; content: string }) {
+      if (!crepeInstance) return;
+      const currentVal = newParams.content || "";
+      if (crepeInstance.getMarkdown() !== currentVal) {
+        isUpdating = true;
+        crepeInstance.destroy().then(() => {
+          if (!node) return;
+          crepeInstance = new Crepe({
+            root: node,
+            defaultValue: currentVal,
+          });
+          crepeInstance.create().then(() => {
+            if (!crepeInstance) return;
+            crepeInstance.on((listener) => {
+              listener.markdownUpdated((ctx, markdown) => {
+                if (isUpdating) return;
+                store.pages[newParams.pageId] = markdown;
+                store.dirtyPages.add(newParams.pageId);
+                store.requestSave();
+              });
+            });
+            isUpdating = false;
+          });
+        });
+      }
+    },
+    destroy() {
+      if (crepeInstance) {
+        crepeInstance.destroy();
+        crepeInstance = null;
+      }
+    }
+  };
+}
+
+const globalKey = (e: KeyboardEvent) => {
+  const activeEl = document.activeElement;
+  const isI = activeEl && (
+    ["TEXTAREA", "INPUT"].includes(activeEl.tagName) ||
+    activeEl.getAttribute("contenteditable") === "true" ||
+    activeEl.closest("[contenteditable='true']")
+  );
+  const l = e.key === "ArrowLeft", r = e.key === "ArrowRight";
+  if ((l || r) && (!isI || e.altKey)) {
+    e.preventDefault();
+    store.changePage(l ? -1 : 1, true);
+  }
+};
+
+const showCustomPrompt = (t: string, d: string, cb: (v: string) => void) => {
+  promptTitle = t;
+  promptValue = d || "";
+  promptCallback = cb;
+  promptVisible = true;
+  setTimeout(() => (document.getElementById("custom-prompt-input") as HTMLInputElement)?.select(), 50);
+};
+
+const openCtx = (e: MouseEvent, items: ContextMenuItem[]) => {
+  e.preventDefault();
+  e.stopPropagation();
+  contextMenuX = e.clientX;
+  contextMenuY = e.clientY;
+  contextMenuItems = items;
+  contextMenuVisible = true;
+};
+
+const openSub = (items: ContextMenuItem[]) => openCtx({
+  clientX: contextMenuX,
+  clientY: contextMenuY,
+  preventDefault: () => {},
+  stopPropagation: () => {}
+} as any, items);
+
+const tDrop = (e: PointerEvent, on: number) => {
+  if (draggingStickerId && draggingStickerId !== "all") {
+    (e.currentTarget as HTMLElement).classList[on ? "add" : "remove"]("!bg-zinc-800", "!text-white", "scale-105", "!border-zinc-800");
+  }
+};
+
+const packBtnClass = (id: string) => `px-3 py-1.5 rounded-lg text-xs font-semibold transition-all duration-200 active:scale-95 border ${activePackId === id ? "bg-zinc-900 text-white border-zinc-900 shadow-sm" : "bg-zinc-50 hover:bg-zinc-100 text-zinc-600 border-zinc-200/50"}`;
+
+const globalPaste = (e: ClipboardEvent) => {
+  const f = Array.from(e.clipboardData?.items || []).find((i) => i.type.startsWith("image/"))?.getAsFile();
+  if (f) {
+    e.preventDefault();
+    const r = new FileReader();
+    r.onload = (ev) => {
+      const b64 = ev.target?.result as string;
+      StickerBookManager.saveSticker(b64);
+      if (!stickerDrawerOpen) store.spawnImage(b64, pointerX || window.innerWidth / 2, pointerY || window.innerHeight / 2);
+    };
+    r.readAsDataURL(f);
+  }
+};
+
+$effect(() => {
+  activePackId;
+  StickerBookManager.render();
+});
+
+onMount(() => {
+  let d = false;
+  (async () => {
+    await store.init();
+    if (d) return;
+    activePackId = store.meta.activePackId || "all";
+    StickerBookManager.render();
+    store.restoreAllImages();
+  })();
+  window.addEventListener("beforeunload", () => store.saveTimeout && store.executeSave());
+  return () => (d = true);
+});
 </script>
 
 <svelte:window onpointermove={(e)=>{pointerX=e.clientX;pointerY=e.clientY;}} onclick={()=>(contextMenuVisible=false)} onkeydown={globalKey} onpointerup={()=>(draggingStickerId=null)} onpaste={globalPaste} />
 <button class="fixed top-6 right-6 w-12 h-12 bg-white text-zinc-800 border border-zinc-200 rounded-full shadow-[0_8px_30px_rgba(0,0,0,0.12)] text-2xl z-[60] hover:scale-110 active:scale-95 transition-all duration-300 flex items-center justify-center select-none" onclick={()=>stickerDrawerOpen=!stickerDrawerOpen}>🎒</button>
 <div class="fixed top-0 right-0 w-[340px] h-screen bg-white/90 backdrop-blur-lg shadow-[-10px_0_40px_rgba(0,0,0,0.04)] z-[50] transform transition-transform duration-500 ease-out border-l border-zinc-200/60 p-6 overflow-y-auto {stickerDrawerOpen?'translate-x-0':'translate-x-full'} flex flex-col"><div class="flex items-center justify-between mb-2 mt-16"><h2 class="text-2xl font-extrabold text-zinc-800 tracking-tight">Stickers 🌟</h2><span class="text-xs font-semibold px-2 py-0.5 bg-zinc-100 text-zinc-600 rounded-full border border-zinc-200/60 shadow-sm">{loadedStickers.length}</span></div><p class="text-xs text-zinc-500 mb-5 leading-relaxed">Upload images here to turn them into stickers! 👇 💡 <b>Drag stickers onto tabs</b> to organize them. Paste anywhere to add quickly! ✨</p><div class="flex flex-wrap gap-1.5 items-center mb-6 pb-2 border-b border-zinc-100"><button class={packBtnClass("all")} onclick={()=>{activePackId="all";store.meta.activePackId="all";store.requestSave();}} onpointerenter={(e)=>tDrop(e,1)} onpointerleave={(e)=>tDrop(e,0)} onpointerup={(e)=>{tDrop(e,0);draggingStickerId=null;}}>All</button>{#each store.meta.stickerPacks||[] as pack(pack.id)}<button class={packBtnClass(pack.id)} onclick={()=>{activePackId=pack.id;store.meta.activePackId=pack.id;store.requestSave();}} onpointerenter={(e)=>tDrop(e,1)} onpointerleave={(e)=>tDrop(e,0)} onpointerup={(e)=>{tDrop(e,0);if(draggingStickerId){StickerBookManager.moveStickerToPack(draggingStickerId,pack.id);draggingStickerId=null;}}} oncontextmenu={(e)=>openCtx(e,[{label:"Rename",action:()=>showCustomPrompt("Rename Sticker Pack ✏️",pack.name,(n)=>StickerBookManager.renamePack(pack.id,n))},{label:"Delete",danger:true,action:()=>StickerBookManager.deletePack(pack.id)}])} title="Right-click to rename/delete. Drag stickers here to add.">{pack.name}</button>{/each}<button class="w-7 h-7 rounded-lg bg-zinc-100 hover:bg-zinc-200 text-zinc-700 flex items-center justify-center text-sm font-bold border border-zinc-200/60 active:scale-95 transition-all duration-200" onclick={()=>showCustomPrompt("Create New Sticker Pack 📁","",(n)=>StickerBookManager.createPack(n))} title="Create New Sticker Pack">＋</button></div><label class="block w-full cursor-pointer bg-zinc-900 text-white hover:bg-zinc-800 text-center py-3 rounded-xl font-medium text-sm mb-4 transition-all duration-300 hover:shadow-md active:scale-[0.98] border border-transparent">➕ Upload Sticker<input type="file" accept="image/*,image/gif,.gif" class="hidden" onchange={(e)=>{const f=(e.target as HTMLInputElement).files?.[0];if(f){const r=new FileReader();r.onload=(ev)=>StickerBookManager.saveSticker(ev.target?.result as string);r.readAsDataURL(f);}}} /></label>{#if promptVisible}<div class="relative bg-zinc-100 border border-zinc-200 rounded-xl p-4 mb-4 shadow-sm animate-[slideIn_0.2s_ease-out_forwards]"><h3 class="text-sm font-bold text-zinc-800 mb-2">{promptTitle}</h3><input id="custom-prompt-input" type="text" bind:value={promptValue} class="w-full bg-white border border-zinc-200 text-zinc-800 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-800/10 focus:border-zinc-800 mb-3" placeholder="Enter text..." onkeydown={(e)=>{if(e.key==="Enter"){e.preventDefault();promptCallback?.(promptValue);promptVisible=false;}else if(e.key==="Escape"){e.preventDefault();promptVisible=false;}}} /><div class="flex gap-2 justify-end"><button class="px-3 py-1.5 bg-zinc-200 hover:bg-zinc-300 text-zinc-700 rounded-lg text-xs font-bold" onclick={()=>promptVisible=false}>Cancel</button><button class="px-3 py-1.5 bg-zinc-900 hover:bg-zinc-800 text-white rounded-lg text-xs font-bold" onclick={()=>{promptCallback?.(promptValue);promptVisible=false;}}>Save</button></div></div>{/if}<div class="flex-1 overflow-y-auto pr-1"><div class="grid grid-cols-2 gap-4 pb-12">{#if !loadedStickers.length}<div class="col-span-2 text-center text-sm text-zinc-400 mt-4">No stickers saved yet! 😿</div>{/if}{#each loadedStickers as s(s.id)}<div class="relative cursor-grab active:cursor-grabbing group flex items-center justify-center p-3 bg-white/60 hover:bg-white rounded-2xl shadow-sm border border-zinc-200/50 transition-all duration-300 {draggingStickerId===s.id?'opacity-40 scale-95':'hover:-translate-y-0.5'}" onpointerdown={(e)=>{if(e.button!==0)return;e.preventDefault();draggingStickerId=s.id;}} onpointerenter={()=>{if(draggingStickerId&&draggingStickerId!==s.id)StickerBookManager.reorderSticker(draggingStickerId,s.id);}} oncontextmenu={(e)=>openCtx(e,[...(activePackId!=="all"?[{label:`Remove from Pack ❌`,action:()=>StickerBookManager.removeStickerFromPack(s.id,activePackId)}]:[]),{label:"Delete",danger:true,action:()=>StickerBookManager.removeSticker(s.id)}])}><img src={s.src} draggable="false" class="max-w-full max-h-24 object-contain filter drop-shadow-sm group-hover:drop-shadow-md" alt="sticker" /></div>{/each}</div></div></div>
-<div class="flex w-full min-h-screen will-change-transform relative items-start transition-transform duration-500 ease-[cubic-bezier(0.2,0.8,0.2,1)]" style="transform: translateX(-{store.currentP*100}vw)">{#each store.meta.pageOrder as pId,i(pId)}<div class="page-wrapper w-[100vw] min-h-screen flex-shrink-0 relative flex justify-center overflow-hidden" data-page-id={pId} use:pointerAction={{ignore:(e)=>["TEXTAREA","BUTTON"].includes((e.target as HTMLElement).tagName)||(e.target as HTMLElement).classList.contains("bullet-text")||!!(e.target as HTMLElement).closest(".region-box")||!!(e.target as HTMLElement).closest(".draggable-image")||!!(e.target as HTMLElement).closest("#page-indicator"),onDown:(e)=>RegionManager.start(e),onMove:(e)=>RegionManager.draw(e),onUp:()=>RegionManager.stop()}} onpointerup={(e)=>{if(draggingStickerId){const s=loadedStickers.find((st)=>st.id===draggingStickerId);if(s){const r=e.currentTarget.getBoundingClientRect();store.spawnImage(s.src,e.clientX-r.left,e.clientY-r.top);}draggingStickerId=null;}}} ondragover={(e)=>e.preventDefault()} ondrop={(e)=>{e.preventDefault();const r=(e.currentTarget as HTMLElement).getBoundingClientRect(),f=Array.from(e.dataTransfer?.files||[]).find(x=>x.type.startsWith("image/"));if(f){const fr=new FileReader();fr.onload=(ev)=>{const b=ev.target?.result as string;StickerBookManager.saveSticker(b);store.spawnImage(b,e.clientX-r.left,e.clientY-r.top);};fr.readAsDataURL(f);}else{try{const d=JSON.parse(e.dataTransfer?.getData("application/json")||"");if(d?.type==="sticker")store.spawnImage(d.src,e.clientX-r.left,e.clientY-r.top);}catch(err){}}}}><div class="absolute bottom-8 left-0 w-full text-center text-zinc-400 text-sm font-mono tracking-widest select-none pointer-events-none">{i+1}</div>{#each store.meta.regions.filter((r)=>r.surfaceId===pId) as r(r.id)}<div class="region-box absolute border transition-colors duration-300 rounded-lg flex flex-col layer-{r.layerBucket||'paper'} paper-{r.paperType||'blank'} {focusedRegionId===r.id?'border-zinc-800 shadow-md ring-1 ring-zinc-800/10':'border-zinc-300 hover:border-zinc-400 shadow-sm'}" data-locked={r.locked} style="left:{r.x}px;top:{r.y}px;width:{r.width}px;min-height:{r.height}px;" oncontextmenu={(e)=>openCtx(e,[{label:r.locked?"Unlock":"Lock",action:()=>{r.locked=!r.locked;store.requestSave();}},{label:`Paper (${r.paperType||'blank'}) >`,action:()=>openSub(CONFIG.PAPER_TYPES.map(pt=>({label:pt.charAt(0).toUpperCase()+pt.slice(1),action:()=>{r.paperType=pt;store.requestSave();}})))},{label:`Layer (${r.layerBucket||"paper"}) >`,action:()=>openSub(CONFIG.LAYERS.map(l=>({label:l,action:()=>{r.layerBucket=l;store.requestSave();}})))},{label:"Clear",action:()=>{store.pages[r.pageId]=[store.createBlock()];store.rebuildIndex();store.dirtyPages.add(r.pageId);store.requestSave();}},{label:"Delete",danger:true,action:()=>store.removeRegion(r.id)}])}><div use:dragBehavior={{getObj:()=>store.meta.regions.find((x)=>x.id===r.id),keys:["x","y"]}} onpointerdown={(e)=>{if(r.locked)e.preventDefault();}} class="h-5 bg-transparent {r.locked?'cursor-default':'cursor-grab active:cursor-grabbing'} rounded-t-lg flex items-center px-2 hover:bg-black/5 transition-colors group"></div><div class="flex-1 py-4 pr-4 pl-10 cursor-text" style="touch-action:pan-y;" onclick={(e)=>{const target=e.target as HTMLElement;if(target.closest?.(".bullet-handle")||target.tagName==="TEXTAREA")return;const blocks=store.pages[r.pageId];if(blocks&&blocks.length===1&&blocks[0].text.trim()===""){activeFocusId=blocks[0].id;activeCursorOffset=0;}}}><div class="min-h-full" ondragover={(e)=>e.preventDefault()} ondragend={()=>blockDraggingId=null} ondrop={(e)=>{e.preventDefault();const dId=e.dataTransfer?.getData("text/plain"),tB=(e.target as HTMLElement).closest(".bullet-block")as HTMLElement;if(dId&&tB){const r=tB.getBoundingClientRect();store.moveBlockDOM(dId,tB.dataset.id as string,e.clientY>r.top+r.height/2);}blockDraggingId=null;}}>{#if store.pages[r.pageId]}{#each store.pages[r.pageId] as b(b.id)}<div class="relative flex items-start mb-2 bullet-block group {blockDraggingId===b.id?'dragging':''}" data-id={b.id} style="margin-left:{b.depth*CONFIG.INDENT_PX}px" draggable={blockDraggingId===b.id} ondragstart={(e)=>{const id=(e.target as HTMLElement).closest(".bullet-block")?.getAttribute("data-id");if(id)blockDraggingId=id;}}><div class={Utils.getHandleClasses(CONFIG.CYCLE.includes(b.type))} draggable="true" ondragstart={(e)=>{e.dataTransfer?.setData("text/plain",b.id);blockDraggingId=b.id;}} ondragend={()=>blockDraggingId=null}>{CONFIG.CYCLE.includes(b.type)?CONFIG.BULLETS[b.type]:"::"}</div><textarea use:autoFocus={{id:b.id,focusId:activeFocusId,offset:activeCursorOffset}} class="{Utils.getBlockClasses(b.type)} resize-none overflow-hidden bg-transparent" rows="1" spellcheck="false" bind:value={b.text} use:autoResize onkeydown={(e)=>{const target=e.target as HTMLTextAreaElement;if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();EditorEngine.split(b.id,target.selectionStart);}if(e.key==="Backspace"&&target.selectionStart===target.selectionEnd&&target.selectionStart===0){e.preventDefault();EditorEngine.merge(b.id);}if(e.key==="Tab"){e.preventDefault();EditorEngine.indent(b.id,e.shiftKey?-1:1);}if(e.key==="ArrowUp"){e.preventDefault();EditorEngine.nav(b.id,-1);}if(e.key==="ArrowDown"){e.preventDefault();EditorEngine.nav(b.id,1);}}} oninput={(e)=>EditorEngine.updateText(b.id,(e.target as HTMLTextAreaElement).value)} onfocus={()=>focusedRegionId=r.id} onblur={()=>{if(focusedRegionId===r.id)focusedRegionId=null;}}></textarea></div>{/each}{/if}</div></div>{#if !r.locked}<div use:dragBehavior={{getObj:()=>store.meta.regions.find((x)=>x.id===r.id),keys:["width","height"],min:[CONFIG.MIN_REGION_SIZE,CONFIG.MIN_REGION_SIZE]}} class="absolute bottom-0 right-0 w-5 h-5 cursor-se-resize flex items-end justify-end p-1 opacity-0 hover:opacity-100 transition-opacity z-10"><div class="w-2 h-2 border-r-2 border-b-2 border-zinc-400 rounded-sm pointer-events-none"></div></div>{/if}</div>{/each}{#if isDrawingRegion&&tempRegion.surfaceId===pId}<div class="absolute border border-zinc-400 bg-white/20 rounded-lg pointer-events-none layer-focus" style="left:{tempRegion.x}px;top:{tempRegion.y}px;width:{tempRegion.w}px;height:{tempRegion.h}px"></div>{/if}{#each store.meta.placedImages.filter((img)=>img.pageId===pId) as img(img.id)}{#if store.loadedImages[img.id]}<img src={store.loadedImages[img.id]} draggable="false" oncontextmenu={(e)=>openCtx(e,[{label:img.locked?"Unlock":"Lock",action:()=>{img.locked=!img.locked;store.requestSave();}},{label:`Resize (${img.scale??1}x) >`,action:()=>openSub(CONFIG.SCALES.map(s=>({label:`${s}x`,action:()=>{img.scale=s;store.requestSave();}})))},{label:`Opacity (${Math.round((img.opacity??1)*100)}%) >`,action:()=>openSub(CONFIG.OPACITIES.map(o=>({label:`${Math.round(o*100)}%`,action:()=>{img.opacity=o;store.requestSave();}})))},{label:"Rotate",action:()=>{img.rotation=((img.rotation||0)+45)%360;store.requestSave();}},{label:`Layer (${img.layerBucket||"sticker"}) >`,action:()=>openSub(CONFIG.LAYERS.map(l=>({label:l,action:()=>{img.layerBucket=l;store.requestSave();}})))},{label:"Delete",danger:true,action:()=>store.removeImage(img.id)}])} class="draggable-image layer-{img.layerBucket||'sticker'} transition-transform duration-200" data-locked={img.locked} alt="placed" style="left:{img.left}px;top:{img.top}px;rotate:{img.rotation||0}deg;opacity:{img.opacity??1};scale:{(img.scale??1)*(zoomedImgId===img.id?1.25:1)};" use:dragBehavior={{getObj:()=>img,keys:["left","top"]}} />{/if}{/each}</div>{/each}</div>
+<div class="flex w-full min-h-screen will-change-transform relative items-start transition-transform duration-500 ease-[cubic-bezier(0.2,0.8,0.2,1)]" style="transform: translateX(-{store.currentP*100}vw)">{#each store.meta.pageOrder as pId,i(pId)}<div class="page-wrapper w-[100vw] min-h-screen flex-shrink-0 relative flex justify-center overflow-hidden" data-page-id={pId} use:pointerAction={{ignore:(e)=>["TEXTAREA","BUTTON"].includes((e.target as HTMLElement).tagName)||(e.target as HTMLElement).classList.contains("bullet-text")||!!(e.target as HTMLElement).closest(".region-box")||!!(e.target as HTMLElement).closest(".draggable-image")||!!(e.target as HTMLElement).closest("#page-indicator")||!!(e.target as HTMLElement).closest(".milkdown")||!!(e.target as HTMLElement).closest("[contenteditable='true']"),onDown:(e)=>RegionManager.start(e),onMove:(e)=>RegionManager.draw(e),onUp:()=>RegionManager.stop()}} onpointerup={(e)=>{if(draggingStickerId){const s=loadedStickers.find((st)=>st.id===draggingStickerId);if(s){const r=e.currentTarget.getBoundingClientRect();store.spawnImage(s.src,e.clientX-r.left,e.clientY-r.top);}draggingStickerId=null;}}} ondragover={(e)=>e.preventDefault()} ondrop={(e)=>{e.preventDefault();const r=(e.currentTarget as HTMLElement).getBoundingClientRect(),f=Array.from(e.dataTransfer?.files||[]).find(x=>x.type.startsWith("image/"));if(f){const fr=new FileReader();fr.onload=(ev)=>{const b=ev.target?.result as string;StickerBookManager.saveSticker(b);store.spawnImage(b,e.clientX-r.left,e.clientY-r.top);};fr.readAsDataURL(f);}else{try{const d=JSON.parse(e.dataTransfer?.getData("application/json")||"");if(d?.type==="sticker")store.spawnImage(d.src,e.clientX-r.left,e.clientY-r.top);}catch(err){}}}}><div class="absolute bottom-8 left-0 w-full text-center text-zinc-400 text-sm font-mono tracking-widest select-none pointer-events-none">{i+1}</div>{#each store.meta.regions.filter((r)=>r.surfaceId===pId) as r(r.id)}<div class="region-box absolute border transition-colors duration-300 rounded-lg flex flex-col layer-{r.layerBucket||'paper'} paper-{r.paperType||'blank'} border-zinc-300 hover:border-zinc-400 shadow-sm" data-locked={r.locked} style="left:{r.x}px;top:{r.y}px;width:{r.width}px;min-height:{r.height}px;" oncontextmenu={(e)=>openCtx(e,[{label:r.locked?"Unlock":"Lock",action:()=>{r.locked=!r.locked;store.requestSave();}},{label:`Paper (${r.paperType||'blank'}) >`,action:()=>openSub(CONFIG.PAPER_TYPES.map(pt=>({label:pt.charAt(0).toUpperCase()+pt.slice(1),action:()=>{r.paperType=pt;store.requestSave();}})))},{label:`Layer (${r.layerBucket||"paper"}) >`,action:()=>openSub(CONFIG.LAYERS.map(l=>({label:l,action:()=>{r.layerBucket=l;store.requestSave();}})))},{label:"Clear",action:()=>{store.pages[r.pageId]="";store.dirtyPages.add(r.pageId);store.requestSave();}},{label:"Delete",danger:true,action:()=>store.removeRegion(r.id)}])}><div use:dragBehavior={{getObj:()=>store.meta.regions.find((x)=>x.id===r.id),keys:["x","y"]}} onpointerdown={(e)=>{if(r.locked)e.preventDefault();}} class="h-5 bg-transparent {r.locked?'cursor-default':'cursor-grab active:cursor-grabbing'} rounded-t-lg flex items-center px-2 hover:bg-black/5 transition-colors group"></div><div class="flex-1 py-2 px-3 overflow-y-auto cursor-text select-text" style="touch-action:pan-y;" onclick={(e)=>{e.stopPropagation();}}><div class="min-h-full w-full h-full milkdown-container"><div use:milkdownEditor={{ pageId: r.pageId, content: store.pages[r.pageId] }} class="w-full h-full"></div></div></div>{#if !r.locked}<div use:dragBehavior={{getObj:()=>store.meta.regions.find((x)=>x.id===r.id),keys:["width","height"],min:[CONFIG.MIN_REGION_SIZE,CONFIG.MIN_REGION_SIZE]}} class="absolute bottom-0 right-0 w-5 h-5 cursor-se-resize flex items-end justify-end p-1 opacity-0 hover:opacity-100 transition-opacity z-10"><div class="w-2 h-2 border-r-2 border-b-2 border-zinc-400 rounded-sm pointer-events-none"></div></div>{/if}</div>{/each}{#if isDrawingRegion&&tempRegion.surfaceId===pId}<div class="absolute border border-zinc-400 bg-white/20 rounded-lg pointer-events-none layer-focus" style="left:{tempRegion.x}px;top:{tempRegion.y}px;width:{tempRegion.w}px;height:{tempRegion.h}px"></div>{/if}{#each store.meta.placedImages.filter((img)=>img.pageId===pId) as img(img.id)}{#if store.loadedImages[img.id]}<img src={store.loadedImages[img.id]} draggable="false" oncontextmenu={(e)=>openCtx(e,[{label:img.locked?"Unlock":"Lock",action:()=>{img.locked=!img.locked;store.requestSave();}},{label:`Resize (${img.scale??1}x) >`,action:()=>openSub(CONFIG.SCALES.map(s=>({label:`${s}x`,action:()=>{img.scale=s;store.requestSave();}})))},{label:`Opacity (${Math.round((img.opacity??1)*100)}%) >`,action:()=>openSub(CONFIG.OPACITIES.map(o=>({label:`${Math.round(o*100)}%`,action:()=>{img.opacity=o;store.requestSave();}})))},{label:"Rotate",action:()=>{img.rotation=((img.rotation||0)+45)%360;store.requestSave();}},{label:`Layer (${img.layerBucket||"sticker"}) >`,action:()=>openSub(CONFIG.LAYERS.map(l=>({label:l,action:()=>{img.layerBucket=l;store.requestSave();}})))},{label:"Delete",danger:true,action:()=>store.removeImage(img.id)}])} class="draggable-image layer-{img.layerBucket||'sticker'} transition-transform duration-200" data-locked={img.locked} alt="placed" style="left:{img.left}px;top:{img.top}px;rotate:{img.rotation||0}deg;opacity:{img.opacity??1};scale:{(img.scale??1)*(zoomedImgId===img.id?1.25:1)};" use:dragBehavior={{getObj:()=>img,keys:["left","top"]}} />{/if}{/each}</div>{/each}</div>
 <div id="page-indicator" class="fixed bottom-6 left-1/2 -translate-x-1/2 flex gap-3 z-50 px-6 py-3.5 bg-zinc-100/90 backdrop-blur-md border border-zinc-300 rounded-full shadow-[0_8px_30px_rgba(0,0,0,0.12)] items-center" onclick={(e)=>{const d=(e.target as HTMLElement).closest(".indicator-dot")as HTMLElement;if(d)store.changePage(parseInt(d.dataset.idx||"0"),false);}}>{#each store.meta.pageOrder as _,i}<span data-idx={i} class="indicator-dot cursor-pointer h-2.5 rounded-full transition-all duration-300 {i===store.currentP?'w-7 bg-zinc-800':'w-2.5 bg-zinc-300 hover:bg-zinc-400'}"></span>{/each}</div>
 {#if contextMenuVisible}<div class="fixed bg-white border border-zinc-200 shadow-xl rounded-md py-1 z-[100] w-48" style="left:{contextMenuX}px;top:{contextMenuY}px">{#each contextMenuItems as item}<button class="w-full text-left px-3 py-1.5 hover:bg-zinc-100 text-sm {item.danger?'text-red-600 font-medium':'text-zinc-800'}" onclick={(e)=>{e.stopPropagation();contextMenuVisible=false;item.action(e);}}>{item.label}</button>{/each}</div>{/if}
 {#if draggingStickerId&&draggingStickerId!=="all"}{@const s=loadedStickers.find((st)=>st.id===draggingStickerId)}{#if s}<img src={s.src} class="fixed pointer-events-none z-[9999] opacity-75 scale-110 drop-shadow-lg" style="left:{pointerX-50}px;top:{pointerY-50}px;width:100px;height:100px;object-fit:contain" alt="ghost" />{/if}{/if}
 
-<style>:global(body){overflow-x:hidden;overflow-y:auto;background-color:#fafafa;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}:global([contenteditable]:empty::before){content:"\FEFF"}.bullet-block{animation:slideIn .15s ease-out forwards;cursor:default}@keyframes slideIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}:global(::-webkit-scrollbar){display:none}.bullet-handle{cursor:grab;user-select:none}.bullet-handle:active{cursor:grabbing}.dragging{opacity:.3}.bullet-text{cursor:text;user-select:text;word-break:break-word;-webkit-hyphens:auto;hyphens:auto}.draggable-image{position:absolute;top:0;left:0;cursor:grab;max-width:300px;filter:drop-shadow(0px 8px 12px rgba(0,0,0,.15));user-select:none;transition:scale .2s ease,rotate .2s ease,opacity .2s ease}.draggable-image:active{cursor:grabbing}.draggable-image[data-locked="true"]{cursor:default}:global(.layer-background){z-index:10}:global(.layer-paper){z-index:20}:global(.layer-sticker){z-index:30}:global(.layer-floating){z-index:40}:global(.layer-focus){z-index:50}:global(.paper-blank){background-color:rgba(250,250,250,.9)}:global(.paper-dot){background:radial-gradient(#d4d4d8 1.5px,transparent 1.5px) 0 0/24px 24px rgba(250,250,250,.9)}:global(.paper-ruled){background:repeating-linear-gradient(transparent,transparent 27px,#e4e4e7 27px,#e4e4e7 28px) 0 0/100% 28px rgba(250,250,250,.9)}:global(.paper-graph){background:repeating-linear-gradient(#e4e4e7 0 1px,transparent 1px 100%) 0 0/24px 24px,repeating-linear-gradient(90deg,#e4e4e7 0 1px,transparent 1px 100%) 0 0/24px 24px rgba(250,250,250,.9)}</style>
+<style>
+:global(body){overflow-x:hidden;overflow-y:auto;background-color:#fafafa;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+:global(::-webkit-scrollbar){display:none}
+.draggable-image{position:absolute;top:0;left:0;cursor:grab;max-width:300px;filter:drop-shadow(0px 8px 12px rgba(0,0,0,.15));user-select:none;transition:scale .2s ease,rotate .2s ease,opacity .2s ease}
+.draggable-image:active{cursor:grabbing}
+.draggable-image[data-locked="true"]{cursor:default}
+:global(.layer-background){z-index:10}
+:global(.layer-paper){z-index:20}
+:global(.layer-sticker){z-index:30}
+:global(.layer-floating){z-index:40}
+:global(.layer-focus){z-index:50}
+:global(.paper-blank){background-color:rgba(250,250,250,.9)}
+:global(.paper-dot){background:radial-gradient(#d4d4d8 1.5px,transparent 1.5px) 0 0/24px 24px rgba(250,250,250,.9)}
+:global(.paper-ruled){background:repeating-linear-gradient(transparent,transparent 27px,#e4e4e7 27px,#e4e4e7 28px) 0 0/100% 28px rgba(250,250,250,.9)}
+:global(.paper-graph){background:repeating-linear-gradient(#e4e4e7 0 1px,transparent 1px 100%) 0 0/24px 24px,repeating-linear-gradient(90deg,#e4e4e7 0 1px,transparent 1px 100%) 0 0/24px 24px rgba(250,250,250,.9)}
+
+/* Milkdown overrides to look premium and transparent */
+:global(.milkdown) {
+  background: transparent !important;
+  box-shadow: none !important;
+  border: none !important;
+  width: 100% !important;
+  height: 100% !important;
+  font-size: 14px;
+}
+:global(.milkdown .editor) {
+  background: transparent !important;
+  padding: 0 !important;
+  outline: none !important;
+  min-height: 50px;
+  color: #27272a;
+}
+:global(.milkdown .editor p) {
+  margin-bottom: 0.5em !important;
+  line-height: 1.5;
+}
+</style>
