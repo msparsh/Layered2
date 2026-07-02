@@ -53,26 +53,12 @@ interface LoadedSticker {
   src: string;
 }
 
-interface ContextMenuItem {
-  label: string;
-  danger?: boolean;
-  action: (e?: MouseEvent) => void;
-}
-
 let zoomedImgId = $state<string | null>(null);
 let stickerDrawerOpen = $state(false);
 let loadedStickers = $state<LoadedSticker[]>([]);
-let contextMenuVisible = $state(false);
-let contextMenuX = $state(0);
-let contextMenuY = $state(0);
-let contextMenuItems = $state<ContextMenuItem[]>([]);
 let isDrawingRegion = $state(false);
 let tempRegion = $state({ x: 0, y: 0, w: 0, h: 0, surfaceId: "" as string | null });
 let activePackId = $state("all");
-let promptVisible = $state(false);
-let promptTitle = $state("");
-let promptValue = $state("");
-let promptCallback = $state<((v: string) => void) | null>(null);
 let draggingStickerId = $state<string | null>(null);
 let pointerX = $state(0);
 let pointerY = $state(0);
@@ -579,29 +565,52 @@ const globalKey = (e: KeyboardEvent) => {
   }
 };
 
-const showCustomPrompt = (t: string, d: string, cb: (v: string) => void) => {
-  promptTitle = t;
-  promptValue = d || "";
-  promptCallback = cb;
-  promptVisible = true;
-  setTimeout(() => (document.getElementById("custom-prompt-input") as HTMLInputElement)?.select(), 50);
-};
+const contextMenuCallbacks = new Map<string, () => void>();
 
-const openCtx = (e: MouseEvent, items: ContextMenuItem[]) => {
+function openCtx(e: MouseEvent, items: any[]) {
   e.preventDefault();
   e.stopPropagation();
-  contextMenuX = e.clientX;
-  contextMenuY = e.clientY;
-  contextMenuItems = items;
-  contextMenuVisible = true;
-};
+  
+  contextMenuCallbacks.clear();
+  
+  function processItems(menuItems: any[]): any[] {
+    return menuItems.map((item, index) => {
+      if (item.type === 'separator') {
+        return { type: 'separator' };
+      }
+      
+      const id = `item-${index}-${Math.random().toString(36).substr(2, 9)}`;
+      
+      const result: any = {
+        label: item.label,
+        id
+      };
+      
+      if (item.action) {
+        contextMenuCallbacks.set(id, item.action);
+      }
+      
+      if (item.submenu) {
+        result.submenu = processItems(item.submenu);
+      }
+      
+      return result;
+    });
+  }
+  
+  const serializableTemplate = processItems(items);
+  if (window.electronAPI?.showContextMenu) {
+    window.electronAPI.showContextMenu(serializableTemplate);
+  }
+}
 
-const openSub = (items: ContextMenuItem[]) => openCtx({
-  clientX: contextMenuX,
-  clientY: contextMenuY,
-  preventDefault: () => {},
-  stopPropagation: () => {}
-} as any, items);
+const showPromptDialog = (t: string, d: string, cb: (v: string) => void) => {
+  // Using native browser/electron prompt input modal
+  const val = prompt(t, d);
+  if (val !== null) {
+    cb(val);
+  }
+};
 
 const tDrop = (e: PointerEvent, on: number) => {
   if (draggingStickerId && draggingStickerId !== "all") {
@@ -639,17 +648,25 @@ onMount(() => {
     StickerBookManager.render();
     store.restoreAllImages();
   })();
+  
+  if (window.electronAPI?.onContextMenuClick) {
+    window.electronAPI.onContextMenuClick((itemId) => {
+      if (contextMenuCallbacks.has(itemId)) {
+        contextMenuCallbacks.get(itemId)!();
+      }
+    });
+  }
+
   window.addEventListener("beforeunload", () => store.saveTimeout && store.executeSave());
   return () => (d = true);
 });
 </script>
 
-<svelte:window onpointermove={(e)=>{pointerX=e.clientX;pointerY=e.clientY;}} onclick={()=>(contextMenuVisible=false)} onkeydown={globalKey} onpointerup={()=>(draggingStickerId=null)} onpaste={globalPaste} />
+<svelte:window onpointermove={(e)=>{pointerX=e.clientX;pointerY=e.clientY;}} onkeydown={globalKey} onpointerup={()=>(draggingStickerId=null)} onpaste={globalPaste} />
 <button class="fixed top-6 right-6 w-12 h-12 bg-white text-zinc-800 border border-zinc-200 rounded-full shadow-[0_8px_30px_rgba(0,0,0,0.12)] text-2xl z-[60] hover:scale-110 active:scale-95 transition-all duration-300 flex items-center justify-center select-none" onclick={()=>stickerDrawerOpen=!stickerDrawerOpen}>🎒</button>
-<div class="fixed top-0 right-0 w-[340px] h-screen bg-white/90 backdrop-blur-lg shadow-[-10px_0_40px_rgba(0,0,0,0.04)] z-[50] transform transition-transform duration-500 ease-out border-l border-zinc-200/60 p-6 overflow-y-auto {stickerDrawerOpen?'translate-x-0':'translate-x-full'} flex flex-col"><div class="flex items-center justify-between mb-2 mt-16"><h2 class="text-2xl font-extrabold text-zinc-800 tracking-tight">Stickers 🌟</h2><span class="text-xs font-semibold px-2 py-0.5 bg-zinc-100 text-zinc-600 rounded-full border border-zinc-200/60 shadow-sm">{loadedStickers.length}</span></div><p class="text-xs text-zinc-500 mb-5 leading-relaxed">Upload images here to turn them into stickers! 👇 💡 <b>Drag stickers onto tabs</b> to organize them. Paste anywhere to add quickly! ✨</p><div class="flex flex-wrap gap-1.5 items-center mb-6 pb-2 border-b border-zinc-100"><button class={packBtnClass("all")} onclick={()=>{activePackId="all";store.meta.activePackId="all";store.requestSave();}} onpointerenter={(e)=>tDrop(e,1)} onpointerleave={(e)=>tDrop(e,0)} onpointerup={(e)=>{tDrop(e,0);draggingStickerId=null;}}>All</button>{#each store.meta.stickerPacks||[] as pack(pack.id)}<button class={packBtnClass(pack.id)} onclick={()=>{activePackId=pack.id;store.meta.activePackId=pack.id;store.requestSave();}} onpointerenter={(e)=>tDrop(e,1)} onpointerleave={(e)=>tDrop(e,0)} onpointerup={(e)=>{tDrop(e,0);if(draggingStickerId){StickerBookManager.moveStickerToPack(draggingStickerId,pack.id);draggingStickerId=null;}}} oncontextmenu={(e)=>openCtx(e,[{label:"Rename",action:()=>showCustomPrompt("Rename Sticker Pack ✏️",pack.name,(n)=>StickerBookManager.renamePack(pack.id,n))},{label:"Delete",danger:true,action:()=>StickerBookManager.deletePack(pack.id)}])} title="Right-click to rename/delete. Drag stickers here to add.">{pack.name}</button>{/each}<button class="w-7 h-7 rounded-lg bg-zinc-100 hover:bg-zinc-200 text-zinc-700 flex items-center justify-center text-sm font-bold border border-zinc-200/60 active:scale-95 transition-all duration-200" onclick={()=>showCustomPrompt("Create New Sticker Pack 📁","",(n)=>StickerBookManager.createPack(n))} title="Create New Sticker Pack">＋</button></div><label class="block w-full cursor-pointer bg-zinc-900 text-white hover:bg-zinc-800 text-center py-3 rounded-xl font-medium text-sm mb-4 transition-all duration-300 hover:shadow-md active:scale-[0.98] border border-transparent">➕ Upload Sticker<input type="file" accept="image/*,image/gif,.gif" class="hidden" onchange={(e)=>{const f=(e.target as HTMLInputElement).files?.[0];if(f){const r=new FileReader();r.onload=(ev)=>StickerBookManager.saveSticker(ev.target?.result as string);r.readAsDataURL(f);}}} /></label>{#if promptVisible}<div class="relative bg-zinc-100 border border-zinc-200 rounded-xl p-4 mb-4 shadow-sm animate-[slideIn_0.2s_ease-out_forwards]"><h3 class="text-sm font-bold text-zinc-800 mb-2">{promptTitle}</h3><input id="custom-prompt-input" type="text" bind:value={promptValue} class="w-full bg-white border border-zinc-200 text-zinc-800 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-800/10 focus:border-zinc-800 mb-3" placeholder="Enter text..." onkeydown={(e)=>{if(e.key==="Enter"){e.preventDefault();promptCallback?.(promptValue);promptVisible=false;}else if(e.key==="Escape"){e.preventDefault();promptVisible=false;}}} /><div class="flex gap-2 justify-end"><button class="px-3 py-1.5 bg-zinc-200 hover:bg-zinc-300 text-zinc-700 rounded-lg text-xs font-bold" onclick={()=>promptVisible=false}>Cancel</button><button class="px-3 py-1.5 bg-zinc-900 hover:bg-zinc-800 text-white rounded-lg text-xs font-bold" onclick={()=>{promptCallback?.(promptValue);promptVisible=false;}}>Save</button></div></div>{/if}<div class="flex-1 overflow-y-auto pr-1"><div class="grid grid-cols-2 gap-4 pb-12">{#if !loadedStickers.length}<div class="col-span-2 text-center text-sm text-zinc-400 mt-4">No stickers saved yet! 😿</div>{/if}{#each loadedStickers as s(s.id)}<div class="relative cursor-grab active:cursor-grabbing group flex items-center justify-center p-3 bg-white/60 hover:bg-white rounded-2xl shadow-sm border border-zinc-200/50 transition-all duration-300 {draggingStickerId===s.id?'opacity-40 scale-95':'hover:-translate-y-0.5'}" onpointerdown={(e)=>{if(e.button!==0)return;e.preventDefault();draggingStickerId=s.id;}} onpointerenter={()=>{if(draggingStickerId&&draggingStickerId!==s.id)StickerBookManager.reorderSticker(draggingStickerId,s.id);}} oncontextmenu={(e)=>openCtx(e,[...(activePackId!=="all"?[{label:`Remove from Pack ❌`,action:()=>StickerBookManager.removeStickerFromPack(s.id,activePackId)}]:[]),{label:"Delete",danger:true,action:()=>StickerBookManager.removeSticker(s.id)}])}><img src={s.src} draggable="false" class="max-w-full max-h-24 object-contain filter drop-shadow-sm group-hover:drop-shadow-md" alt="sticker" /></div>{/each}</div></div></div>
-<div class="flex w-full min-h-screen will-change-transform relative items-start transition-transform duration-500 ease-[cubic-bezier(0.2,0.8,0.2,1)]" style="transform: translateX(-{store.currentP*100}vw)">{#each store.meta.pageOrder as pId,i(pId)}<div class="page-wrapper w-[100vw] min-h-screen flex-shrink-0 relative flex justify-center overflow-hidden" data-page-id={pId} use:pointerAction={{ignore:(e)=>["TEXTAREA","BUTTON"].includes((e.target as HTMLElement).tagName)||(e.target as HTMLElement).classList.contains("bullet-text")||!!(e.target as HTMLElement).closest(".region-box")||!!(e.target as HTMLElement).closest(".draggable-image")||!!(e.target as HTMLElement).closest("#page-indicator")||!!(e.target as HTMLElement).closest(".milkdown")||!!(e.target as HTMLElement).closest("[contenteditable='true']"),onDown:(e)=>RegionManager.start(e),onMove:(e)=>RegionManager.draw(e),onUp:()=>RegionManager.stop()}} onpointerup={(e)=>{if(draggingStickerId){const s=loadedStickers.find((st)=>st.id===draggingStickerId);if(s){const r=e.currentTarget.getBoundingClientRect();store.spawnImage(s.src,e.clientX-r.left,e.clientY-r.top);}draggingStickerId=null;}}} ondragover={(e)=>e.preventDefault()} ondrop={(e)=>{e.preventDefault();const r=(e.currentTarget as HTMLElement).getBoundingClientRect(),f=Array.from(e.dataTransfer?.files||[]).find(x=>x.type.startsWith("image/"));if(f){const fr=new FileReader();fr.onload=(ev)=>{const b=ev.target?.result as string;StickerBookManager.saveSticker(b);store.spawnImage(b,e.clientX-r.left,e.clientY-r.top);};fr.readAsDataURL(f);}else{try{const d=JSON.parse(e.dataTransfer?.getData("application/json")||"");if(d?.type==="sticker")store.spawnImage(d.src,e.clientX-r.left,e.clientY-r.top);}catch(err){}}}}><div class="absolute bottom-8 left-0 w-full text-center text-zinc-400 text-sm font-mono tracking-widest select-none pointer-events-none">{i+1}</div>{#each store.meta.regions.filter((r)=>r.surfaceId===pId) as r(r.id)}<div class="region-box absolute border transition-colors duration-300 rounded-lg flex flex-col layer-{r.layerBucket||'paper'} paper-{r.paperType||'blank'} border-zinc-300 hover:border-zinc-400 shadow-sm" data-locked={r.locked} style="left:{r.x}px;top:{r.y}px;width:{r.width}px;min-height:{r.height}px;" oncontextmenu={(e)=>openCtx(e,[{label:r.locked?"Unlock":"Lock",action:()=>{r.locked=!r.locked;store.requestSave();}},{label:`Paper (${r.paperType||'blank'}) >`,action:()=>openSub(CONFIG.PAPER_TYPES.map(pt=>({label:pt.charAt(0).toUpperCase()+pt.slice(1),action:()=>{r.paperType=pt;store.requestSave();}})))},{label:`Layer (${r.layerBucket||"paper"}) >`,action:()=>openSub(CONFIG.LAYERS.map(l=>({label:l,action:()=>{r.layerBucket=l;store.requestSave();}})))},{label:"Clear",action:()=>{store.pages[r.pageId]="";store.dirtyPages.add(r.pageId);store.requestSave();}},{label:"Delete",danger:true,action:()=>store.removeRegion(r.id)}])}><div use:dragBehavior={{getObj:()=>store.meta.regions.find((x)=>x.id===r.id),keys:["x","y"]}} onpointerdown={(e)=>{if(r.locked)e.preventDefault();}} class="h-5 bg-transparent {r.locked?'cursor-default':'cursor-grab active:cursor-grabbing'} rounded-t-lg flex items-center px-2 hover:bg-black/5 transition-colors group"></div><div class="flex-1 py-2 px-3 overflow-y-auto cursor-text select-text" style="touch-action:pan-y;" onclick={(e)=>{e.stopPropagation();}}><div class="min-h-full w-full h-full milkdown-container"><div use:milkdownEditor={{ pageId: r.pageId, content: store.pages[r.pageId] }} class="w-full h-full"></div></div></div>{#if !r.locked}<div use:dragBehavior={{getObj:()=>store.meta.regions.find((x)=>x.id===r.id),keys:["width","height"],min:[CONFIG.MIN_REGION_SIZE,CONFIG.MIN_REGION_SIZE]}} class="absolute bottom-0 right-0 w-5 h-5 cursor-se-resize flex items-end justify-end p-1 opacity-0 hover:opacity-100 transition-opacity z-10"><div class="w-2 h-2 border-r-2 border-b-2 border-zinc-400 rounded-sm pointer-events-none"></div></div>{/if}</div>{/each}{#if isDrawingRegion&&tempRegion.surfaceId===pId}<div class="absolute border border-zinc-400 bg-white/20 rounded-lg pointer-events-none layer-focus" style="left:{tempRegion.x}px;top:{tempRegion.y}px;width:{tempRegion.w}px;height:{tempRegion.h}px"></div>{/if}{#each store.meta.placedImages.filter((img)=>img.pageId===pId) as img(img.id)}{#if store.loadedImages[img.id]}<img src={store.loadedImages[img.id]} draggable="false" oncontextmenu={(e)=>openCtx(e,[{label:img.locked?"Unlock":"Lock",action:()=>{img.locked=!img.locked;store.requestSave();}},{label:`Resize (${img.scale??1}x) >`,action:()=>openSub(CONFIG.SCALES.map(s=>({label:`${s}x`,action:()=>{img.scale=s;store.requestSave();}})))},{label:`Opacity (${Math.round((img.opacity??1)*100)}%) >`,action:()=>openSub(CONFIG.OPACITIES.map(o=>({label:`${Math.round(o*100)}%`,action:()=>{img.opacity=o;store.requestSave();}})))},{label:"Rotate",action:()=>{img.rotation=((img.rotation||0)+45)%360;store.requestSave();}},{label:`Layer (${img.layerBucket||"sticker"}) >`,action:()=>openSub(CONFIG.LAYERS.map(l=>({label:l,action:()=>{img.layerBucket=l;store.requestSave();}})))},{label:"Delete",danger:true,action:()=>store.removeImage(img.id)}])} class="draggable-image layer-{img.layerBucket||'sticker'} transition-transform duration-200" data-locked={img.locked} alt="placed" style="left:{img.left}px;top:{img.top}px;rotate:{img.rotation||0}deg;opacity:{img.opacity??1};scale:{(img.scale??1)*(zoomedImgId===img.id?1.25:1)};" use:dragBehavior={{getObj:()=>img,keys:["left","top"]}} />{/if}{/each}</div>{/each}</div>
+<div class="fixed top-0 right-0 w-[340px] h-screen bg-white/90 backdrop-blur-lg shadow-[-10px_0_40px_rgba(0,0,0,0.04)] z-[50] transform transition-transform duration-500 ease-out border-l border-zinc-200/60 p-6 overflow-y-auto {stickerDrawerOpen?'translate-x-0':'translate-x-full'} flex flex-col"><div class="flex items-center justify-between mb-2 mt-16"><h2 class="text-2xl font-extrabold text-zinc-800 tracking-tight">Stickers 🌟</h2><span class="text-xs font-semibold px-2 py-0.5 bg-zinc-100 text-zinc-600 rounded-full border border-zinc-200/60 shadow-sm">{loadedStickers.length}</span></div><p class="text-xs text-zinc-500 mb-5 leading-relaxed">Upload images here to turn them into stickers! 👇 💡 <b>Drag stickers onto tabs</b> to organize them. Paste anywhere to add quickly! ✨</p><div class="flex flex-wrap gap-1.5 items-center mb-6 pb-2 border-b border-zinc-100"><button class={packBtnClass("all")} onclick={()=>{activePackId="all";store.meta.activePackId="all";store.requestSave();}} onpointerenter={(e)=>tDrop(e,1)} onpointerleave={(e)=>tDrop(e,0)} onpointerup={(e)=>{tDrop(e,0);draggingStickerId=null;}}>All</button>{#each store.meta.stickerPacks||[] as pack(pack.id)}<button class={packBtnClass(pack.id)} onclick={()=>{activePackId=pack.id;store.meta.activePackId=pack.id;store.requestSave();}} onpointerenter={(e)=>tDrop(e,1)} onpointerleave={(e)=>tDrop(e,0)} onpointerup={(e)=>{tDrop(e,0);if(draggingStickerId){StickerBookManager.moveStickerToPack(draggingStickerId,pack.id);draggingStickerId=null;}}} oncontextmenu={(e)=>openCtx(e,[{label:"Rename",action:()=>showPromptDialog("Rename Sticker Pack ✏️",pack.name,(n)=>StickerBookManager.renamePack(pack.id,n))},{label:"Delete",danger:true,action:()=>StickerBookManager.deletePack(pack.id)}])} title="Right-click to rename/delete. Drag stickers here to add.">{pack.name}</button>{/each}<button class="w-7 h-7 rounded-lg bg-zinc-100 hover:bg-zinc-200 text-zinc-700 flex items-center justify-center text-sm font-bold border border-zinc-200/60 active:scale-95 transition-all duration-200" onclick={()=>showPromptDialog("Create New Sticker Pack 📁","",(n)=>StickerBookManager.createPack(n))} title="Create New Sticker Pack">＋</button></div><label class="block w-full cursor-pointer bg-zinc-900 text-white hover:bg-zinc-800 text-center py-3 rounded-xl font-medium text-sm mb-4 transition-all duration-300 hover:shadow-md active:scale-[0.98] border border-transparent">➕ Upload Sticker<input type="file" accept="image/*,image/gif,.gif" class="hidden" onchange={(e)=>{const f=(e.target as HTMLInputElement).files?.[0];if(f){const r=new FileReader();r.onload=(ev)=>StickerBookManager.saveSticker(ev.target?.result as string);r.readAsDataURL(f);}}} /></label><div class="flex-1 overflow-y-auto pr-1"><div class="grid grid-cols-2 gap-4 pb-12">{#if !loadedStickers.length}<div class="col-span-2 text-center text-sm text-zinc-400 mt-4">No stickers saved yet! 😿</div>{/if}{#each loadedStickers as s(s.id)}<div class="relative cursor-grab active:cursor-grabbing group flex items-center justify-center p-3 bg-white/60 hover:bg-white rounded-2xl shadow-sm border border-zinc-200/50 transition-all duration-300 {draggingStickerId===s.id?'opacity-40 scale-95':'hover:-translate-y-0.5'}" onpointerdown={(e)=>{if(e.button!==0)return;e.preventDefault();draggingStickerId=s.id;}} onpointerenter={()=>{if(draggingStickerId&&draggingStickerId!==s.id)StickerBookManager.reorderSticker(draggingStickerId,s.id);}} oncontextmenu={(e)=>openCtx(e,[...(activePackId!=="all"?[{label:`Remove from Pack ❌`,action:()=>StickerBookManager.removeStickerFromPack(s.id,activePackId)}]:[]),{label:"Delete",danger:true,action:()=>StickerBookManager.removeSticker(s.id)}])}><img src={s.src} draggable="false" class="max-w-full max-h-24 object-contain filter drop-shadow-sm group-hover:drop-shadow-md" alt="sticker" /></div>{/each}</div></div></div>
+<div class="flex w-full min-h-screen will-change-transform relative items-start transition-transform duration-500 ease-[cubic-bezier(0.2,0.8,0.2,1)]" style="transform: translateX(-{store.currentP*100}vw)">{#each store.meta.pageOrder as pId,i(pId)}<div class="page-wrapper w-[100vw] min-h-screen flex-shrink-0 relative flex justify-center overflow-hidden" data-page-id={pId} use:pointerAction={{ignore:(e)=>["TEXTAREA","BUTTON"].includes((e.target as HTMLElement).tagName)||(e.target as HTMLElement).classList.contains("bullet-text")||!!(e.target as HTMLElement).closest(".region-box")||!!(e.target as HTMLElement).closest(".draggable-image")||!!(e.target as HTMLElement).closest("#page-indicator")||!!(e.target as HTMLElement).closest(".milkdown")||!!(e.target as HTMLElement).closest("[contenteditable='true']"),onDown:(e)=>RegionManager.start(e),onMove:(e)=>RegionManager.draw(e),onUp:()=>RegionManager.stop()}} onpointerup={(e)=>{if(draggingStickerId){const s=loadedStickers.find((st)=>st.id===draggingStickerId);if(s){const r=e.currentTarget.getBoundingClientRect();store.spawnImage(s.src,e.clientX-r.left,e.clientY-r.top);}draggingStickerId=null;}}} ondragover={(e)=>e.preventDefault()} ondrop={(e)=>{e.preventDefault();const r=(e.currentTarget as HTMLElement).getBoundingClientRect(),f=Array.from(e.dataTransfer?.files||[]).find(x=>x.type.startsWith("image/"));if(f){const fr=new FileReader();fr.onload=(ev)=>{const b=ev.target?.result as string;StickerBookManager.saveSticker(b);store.spawnImage(b,e.clientX-r.left,e.clientY-r.top);};fr.readAsDataURL(f);}else{try{const d=JSON.parse(e.dataTransfer?.getData("application/json")||"");if(d?.type==="sticker")store.spawnImage(d.src,e.clientX-r.left,e.clientY-r.top);}catch(err){}}}}><div class="absolute bottom-8 left-0 w-full text-center text-zinc-400 text-sm font-mono tracking-widest select-none pointer-events-none">{i+1}</div>{#each store.meta.regions.filter((r)=>r.surfaceId===pId) as r(r.id)}<div class="region-box absolute border transition-colors duration-300 rounded-lg flex flex-col layer-{r.layerBucket||'paper'} paper-{r.paperType||'blank'} border-zinc-300 hover:border-zinc-400 shadow-sm" data-locked={r.locked} style="left:{r.x}px;top:{r.y}px;width:{r.width}px;min-height:{r.height}px;" oncontextmenu={(e)=>openCtx(e,[{label:r.locked?"Unlock":"Lock",action:()=>{r.locked=!r.locked;store.requestSave();}},{label:`Paper (${r.paperType||'blank'})`,submenu:CONFIG.PAPER_TYPES.map(pt=>({label:pt.charAt(0).toUpperCase()+pt.slice(1),action:()=>{r.paperType=pt;store.requestSave();}}))},{label:`Layer (${r.layerBucket||"paper"})`,submenu:CONFIG.LAYERS.map(l=>({label:l,action:()=>{r.layerBucket=l;store.requestSave();}}))},{label:"Clear",action:()=>{store.pages[r.pageId]="";store.dirtyPages.add(r.pageId);store.requestSave();}},{label:"Delete",danger:true,action:()=>store.removeRegion(r.id)}])}><div use:dragBehavior={{getObj:()=>store.meta.regions.find((x)=>x.id===r.id),keys:["x","y"]}} onpointerdown={(e)=>{if(r.locked)e.preventDefault();}} class="h-5 bg-transparent {r.locked?'cursor-default':'cursor-grab active:cursor-grabbing'} rounded-t-lg flex items-center px-2 hover:bg-black/5 transition-colors group"></div><div class="flex-1 py-2 px-3 overflow-y-auto cursor-text select-text" style="touch-action:pan-y;" onclick={(e)=>{e.stopPropagation();}}><div class="min-h-full w-full h-full milkdown-container"><div use:milkdownEditor={{ pageId: r.pageId, content: store.pages[r.pageId] }} class="w-full h-full"></div></div></div>{#if !r.locked}<div use:dragBehavior={{getObj:()=>store.meta.regions.find((x)=>x.id===r.id),keys:["width","height"],min:[CONFIG.MIN_REGION_SIZE,CONFIG.MIN_REGION_SIZE]}} class="absolute bottom-0 right-0 w-5 h-5 cursor-se-resize flex items-end justify-end p-1 opacity-0 hover:opacity-100 transition-opacity z-10"><div class="w-2 h-2 border-r-2 border-b-2 border-zinc-400 rounded-sm pointer-events-none"></div></div>{/if}</div>{/each}{#if isDrawingRegion&&tempRegion.surfaceId===pId}<div class="absolute border border-zinc-400 bg-white/20 rounded-lg pointer-events-none layer-focus" style="left:{tempRegion.x}px;top:{tempRegion.y}px;width:{tempRegion.w}px;height:{tempRegion.h}px"></div>{/if}{#each store.meta.placedImages.filter((img)=>img.pageId===pId) as img(img.id)}{#if store.loadedImages[img.id]}<img src={store.loadedImages[img.id]} draggable="false" oncontextmenu={(e)=>openCtx(e,[{label:img.locked?"Unlock":"Lock",action:()=>{img.locked=!img.locked;store.requestSave();}},{label:`Resize (${img.scale??1}x)`,submenu:CONFIG.SCALES.map(s=>({label:`${s}x`,action:()=>{img.scale=s;store.requestSave();}}))},{label:`Opacity (${Math.round((img.opacity??1)*100)}%)`,submenu:CONFIG.OPACITIES.map(o=>({label:`${Math.round(o*100)}%`,action:()=>{img.opacity=o;store.requestSave();}}))},{label:"Rotate",action:()=>{img.rotation=((img.rotation||0)+45)%360;store.requestSave();}},{label:`Layer (${img.layerBucket||"sticker"})`,submenu:CONFIG.LAYERS.map(l=>({label:l,action:()=>{img.layerBucket=l;store.requestSave();}}))},{label:"Delete",danger:true,action:()=>store.removeImage(img.id)}])} class="draggable-image layer-{img.layerBucket||'sticker'} transition-transform duration-200" data-locked={img.locked} alt="placed" style="left:{img.left}px;top:{img.top}px;rotate:{img.rotation||0}deg;opacity:{img.opacity??1};scale:{(img.scale??1)*(zoomedImgId===img.id?1.25:1)};" use:dragBehavior={{getObj:()=>img,keys:["left","top"]}} />{/if}{/each}</div>{/each}</div>
 <div id="page-indicator" class="fixed bottom-6 left-1/2 -translate-x-1/2 flex gap-3 z-50 px-6 py-3.5 bg-zinc-100/90 backdrop-blur-md border border-zinc-300 rounded-full shadow-[0_8px_30px_rgba(0,0,0,0.12)] items-center" onclick={(e)=>{const d=(e.target as HTMLElement).closest(".indicator-dot")as HTMLElement;if(d)store.changePage(parseInt(d.dataset.idx||"0"),false);}}>{#each store.meta.pageOrder as _,i}<span data-idx={i} class="indicator-dot cursor-pointer h-2.5 rounded-full transition-all duration-300 {i===store.currentP?'w-7 bg-zinc-800':'w-2.5 bg-zinc-300 hover:bg-zinc-400'}"></span>{/each}</div>
-{#if contextMenuVisible}<div class="fixed bg-white border border-zinc-200 shadow-xl rounded-md py-1 z-[100] w-48" style="left:{contextMenuX}px;top:{contextMenuY}px">{#each contextMenuItems as item}<button class="w-full text-left px-3 py-1.5 hover:bg-zinc-100 text-sm {item.danger?'text-red-600 font-medium':'text-zinc-800'}" onclick={(e)=>{e.stopPropagation();contextMenuVisible=false;item.action(e);}}>{item.label}</button>{/each}</div>{/if}
 {#if draggingStickerId&&draggingStickerId!=="all"}{@const s=loadedStickers.find((st)=>st.id===draggingStickerId)}{#if s}<img src={s.src} class="fixed pointer-events-none z-[9999] opacity-75 scale-110 drop-shadow-lg" style="left:{pointerX-50}px;top:{pointerY-50}px;width:100px;height:100px;object-fit:contain" alt="ghost" />{/if}{/if}
 
 <style>

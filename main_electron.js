@@ -15,7 +15,7 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js') // Optional minimal preload
     },
     show: false,
-    frame: true,                   // Standard window frame (can be hidden if desired)
+    frame: true,                   // Standard window frame
     title: 'Minimal Notebook'
   });
 
@@ -51,9 +51,7 @@ app.whenReady().then(() => {
 
     // 🛡️ SECURITY: Strict Path Resolution
     function getSafePath(relativePath) {
-        // Resolve creates an absolute path, normalizing away any ../
         const targetPath = path.resolve(baseDir, relativePath);
-        // Ensure the absolute target path still starts with the absolute base directory
         if (!targetPath.startsWith(path.resolve(baseDir))) {
             console.error(`🚨 SECURITY ALERT: Path Traversal Attempt Blocked: ${relativePath}`);
             throw new Error('Unauthorized path access');
@@ -87,7 +85,6 @@ app.whenReady().then(() => {
         }
     });
 
-    // 🗑️ CLEANUP: Safely move deleted spreads to the trash folder
     ipcMain.handle('trash-json', async (event, relativePath) => {
         try {
             const targetPath = getSafePath(relativePath);
@@ -97,7 +94,6 @@ app.whenReady().then(() => {
             const timestamp = Date.now();
             const trashPath = path.join(trashDir, `${timestamp}-${fileName}`);
 
-            // Move the file instead of permanently deleting, just in case!
             await fs.rename(targetPath, trashPath);
             return true;
         } catch (error) {
@@ -105,5 +101,33 @@ app.whenReady().then(() => {
             console.error(`Error trashing ${relativePath}:`, error);
             return false;
         }
+    });
+
+    // 📱 NATIVE CONTEXT MENUS: Handle context menu popup from renderer
+    function buildMenu(template, event) {
+        return template.map(item => {
+            if (item.type === 'separator') {
+                return { type: 'separator' };
+            }
+            const menuItem = {
+                label: item.label,
+                enabled: !item.disabled,
+            };
+            if (item.submenu) {
+                menuItem.submenu = buildMenu(item.submenu, event);
+            } else if (item.id) {
+                menuItem.click = () => {
+                    event.sender.send('context-menu-click', item.id);
+                };
+            }
+            return menuItem;
+        });
+    }
+
+    ipcMain.on('show-context-menu', (event, template) => {
+        const menuTemplate = buildMenu(template, event);
+        const menu = Menu.buildFromTemplate(menuTemplate);
+        const win = BrowserWindow.fromWebContents(event.sender);
+        menu.popup({ window: win });
     });
 });
